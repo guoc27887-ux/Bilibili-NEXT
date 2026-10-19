@@ -1,0 +1,293 @@
+import Foundation
+
+/// 媒体文件里的闭区间字节范围，用于 HTTP Range 请求与 HLS byte-range。
+///
+/// 构造时拒绝负起点与终点小于起点的区间，保证 `httpRangeHeaderValue` 总是合法的单段 Range。
+public struct MediaByteRange: Sendable, Equatable {
+    public let start: Int64
+    public let endInclusive: Int64
+
+    public init(start: Int64, endInclusive: Int64) throws {
+        guard start >= 0, endInclusive >= start else {
+            throw MediaByteRangeError.invalidBounds(
+                start: start,
+                endInclusive: endInclusive
+            )
+        }
+
+        self.start = start
+        self.endInclusive = endInclusive
+    }
+
+    public var httpRangeHeaderValue: String {
+        "bytes=\(start)-\(endInclusive)"
+    }
+}
+
+/// `MediaByteRange` 构造时区间不合法；BiliAPI 映射把它归为媒体数据无效。
+public enum MediaByteRangeError: Error, Sendable, Equatable {
+    case invalidBounds(start: Int64, endInclusive: Int64)
+}
+
+/// DASH `SegmentBase`：初始化段与 SIDX 索引在同一媒体文件中的字节范围，由 playurl 映射产生。
+///
+/// 播放桥按 `index` 读取 SIDX 生成 HLS 分段，按 `initialization` 生成 init 段。
+public struct SegmentBase: Sendable, Equatable {
+    public let initialization: MediaByteRange
+    public let index: MediaByteRange
+
+    public init(initialization: MediaByteRange, index: MediaByteRange) {
+        self.initialization = initialization
+        self.index = index
+    }
+}
+
+/// 一条媒体表示是视频还是音频；BiliAPI 映射时只对视频要求尺寸属性。
+public enum MediaKind: String, Sendable, Equatable {
+    case video
+    case audio
+}
+
+/// 服务端对一条语义音轨给出的静态 BS.1770 响度测量与目标。
+///
+/// 这里不保存 endpoint 专属的 offset 或场景参数；所有值在 API 解码边界完整校验，播放策略只再防住
+/// 自己用到的值。
+public struct PlaybackLoudnessMetadata: Sendable, Equatable {
+    public let measuredIntegratedLUFS: Double
+    public let measuredLoudnessRangeLU: Double
+    public let measuredTruePeakDBTP: Double
+    public let measuredThresholdLUFS: Double
+    public let targetIntegratedLUFS: Double
+    public let targetTruePeakDBTP: Double
+
+    public init(
+        measuredIntegratedLUFS: Double,
+        measuredLoudnessRangeLU: Double,
+        measuredTruePeakDBTP: Double,
+        measuredThresholdLUFS: Double,
+        targetIntegratedLUFS: Double,
+        targetTruePeakDBTP: Double
+    ) {
+        self.measuredIntegratedLUFS = measuredIntegratedLUFS
+        self.measuredLoudnessRangeLU = measuredLoudnessRangeLU
+        self.measuredTruePeakDBTP = measuredTruePeakDBTP
+        self.measuredThresholdLUFS = measuredThresholdLUFS
+        self.targetIntegratedLUFS = targetIntegratedLUFS
+        self.targetTruePeakDBTP = targetTruePeakDBTP
+    }
+}
+
+/// 视频表示的尺寸与帧率；构造时拒绝非正宽高和非有限或非正的帧率，帧率缺失时为 nil。
+///
+/// BiliAPI 映射时视频表示必须带合法属性，否则整份媒体数据无效。
+public enum VideoDynamicRange: String, Sendable, Equatable { case sdr = "SDR", pq = "PQ", hlg = "HLG" }
+
+public struct VideoRepresentationAttributes: Sendable, Equatable {
+    public let width: Int
+    public let height: Int
+    public let frameRate: Double?
+    public let dynamicRange: VideoDynamicRange
+    public let supplementalCodecs: String?
+
+    public init(
+        width: Int,
+        height: Int,
+        frameRate: Double?,
+        dynamicRange: VideoDynamicRange = .sdr,
+        supplementalCodecs: String? = nil
+    ) throws {
+        guard width > 0,
+            height > 0,
+            frameRate?.isFinite != false,
+            frameRate.map({ $0 > 0 }) != false
+        else {
+            throw VideoRepresentationAttributesError.invalidValues(
+                width: width,
+                height: height,
+                frameRate: frameRate
+            )
+        }
+
+        self.width = width
+        self.height = height
+        self.frameRate = frameRate
+        self.dynamicRange = dynamicRange
+        self.supplementalCodecs = supplementalCodecs
+    }
+}
+
+/// `VideoRepresentationAttributes` 构造时数值不合法。
+public enum VideoRepresentationAttributesError: Error, Sendable, Equatable {
+    case invalidValues(width: Int, height: Int, frameRate: Double?)
+}
+
+/// DASH 里的一条视频或音频表示，由 BiliAPI 的 `DASHRepresentationPayload` 映射产生，
+/// 播放桥与线路测速消费。
+///
+/// `primaryURL` 与 `backupURLs` 映射时都已通过 `BiliMediaCDNURLPolicy` 并去重；线路偏好可能重排或
+/// 改写候选，所以播放桥读取 SIDX 前与 loopback 资源构造时仍会再查（见 SECURITY-MODEL §4）。
+public struct MediaRepresentation: Sendable, Equatable {
+    public let id: Int
+    public let kind: MediaKind
+    public let codecs: String
+    public let mimeType: String
+    public let bandwidth: Int?
+    public let videoAttributes: VideoRepresentationAttributes?
+    public let primaryURL: URL
+    public let backupURLs: [URL]
+    public let segmentBase: SegmentBase
+    public let initializationOverride: Data?
+
+    public init(
+        id: Int,
+        kind: MediaKind,
+        codecs: String,
+        mimeType: String,
+        bandwidth: Int? = nil,
+        videoAttributes: VideoRepresentationAttributes? = nil,
+        primaryURL: URL,
+        backupURLs: [URL] = [],
+        segmentBase: SegmentBase,
+        initializationOverride: Data? = nil
+    ) {
+        self.id = id
+        self.kind = kind
+        self.codecs = codecs
+        self.mimeType = mimeType
+        self.bandwidth = bandwidth
+        self.videoAttributes = videoAttributes
+        self.primaryURL = primaryURL
+        self.backupURLs = backupURLs
+        self.segmentBase = segmentBase
+        self.initializationOverride = initializationOverride
+    }
+
+    public var urlCandidates: [URL] {
+        [primaryURL] + backupURLs
+    }
+}
+
+/// 用户可选择的一条语义音轨；`representations` 是同一声音内容的媒体候选，而不是独立音轨。
+///
+/// 候选保持 playurl 返回的顺序，不代表码率高低；BiliPlayback 加载时每轨只取码率最高的一条。
+public struct PlaybackAudioTrack: Sendable, Equatable, Identifiable {
+    /// 音轨来源：`original` 为原声，`machineGenerated` 为 AI 配音。
+    ///
+    /// 播放桥要求原声同时是默认与自动选择，AI 配音不是默认且带语言标记，否则拒绝选中的音轨。
+    public enum Role: Sendable, Equatable {
+        case original
+        case machineGenerated
+    }
+
+    public let id: String
+    public let displayName: String
+    public let languageTag: String?
+    public let role: Role
+    public let isDefault: Bool
+    public let isAutoselect: Bool
+    public let loudnessMetadata: PlaybackLoudnessMetadata?
+    public let representations: [MediaRepresentation]
+
+    public init(
+        id: String,
+        displayName: String,
+        languageTag: String? = nil,
+        role: Role,
+        isDefault: Bool,
+        isAutoselect: Bool,
+        loudnessMetadata: PlaybackLoudnessMetadata? = nil,
+        representations: [MediaRepresentation]
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.languageTag = languageTag
+        self.role = role
+        self.isDefault = isDefault
+        self.isAutoselect = isAutoselect
+        self.loudnessMetadata = loudnessMetadata
+        self.representations = representations
+    }
+
+    /// 默认原声音轨的显示名；AI 配音的显示名不得与它重复。
+    public static let originalDisplayName = "原声"
+
+    /// 默认原声音轨的唯一构造处，BiliAPI 的 playurl 映射经它组装清单。
+    ///
+    /// 原声同时是默认与自动选择、不带语言标记，满足播放桥对原声音轨的要求。
+    public static func original(
+        representations: [MediaRepresentation],
+        loudnessMetadata: PlaybackLoudnessMetadata?
+    ) -> PlaybackAudioTrack {
+        PlaybackAudioTrack(
+            id: "original",
+            displayName: originalDisplayName,
+            role: .original,
+            isDefault: true,
+            isAutoselect: true,
+            loudnessMetadata: loudnessMetadata,
+            representations: representations
+        )
+    }
+}
+
+/// DASH 播放所需的视频表示与语义音轨，由 `BiliAPIClient` 的 playurl 映射组装，`DASHToHLSBridge`
+/// 消费。
+///
+/// BiliAPI 只保留 AVC 视频与 AAC 音频，两者都非空才组装；首条音轨是默认原声，已认证时可追加 AI
+/// 配音音轨。
+public struct PlaybackManifest: Sendable, Equatable {
+    public let videoRepresentations: [MediaRepresentation]
+    public let audioTracks: [PlaybackAudioTrack]
+
+    public init(
+        videoRepresentations: [MediaRepresentation],
+        audioTracks: [PlaybackAudioTrack]
+    ) {
+        self.videoRepresentations = videoRepresentations
+        self.audioTracks = audioTracks
+    }
+}
+
+/// 渐进媒体的容器格式；目前只接受 MP4。
+public enum ProgressiveMediaContainer: String, Sendable, Equatable {
+    case mp4
+}
+
+/// 服务端返回的单文件渐进媒体，由 BiliAPI 的 `DURLPayload` 映射产生。
+///
+/// 映射时候选已通过 `BiliMediaCDNURLPolicy` 并去重，长度与时长只接受正数；
+/// 连接前播放桥仍须再次检查来源（见 SECURITY-MODEL §4）。
+public struct ProgressivePlaybackSource: Sendable, Equatable {
+    public let primaryURL: URL
+    public let backupURLs: [URL]
+    public let contentLength: Int64
+    public let durationMilliseconds: Int64
+    public let contentType: String
+    public let container: ProgressiveMediaContainer
+
+    public init(
+        primaryURL: URL,
+        backupURLs: [URL] = [],
+        contentLength: Int64,
+        durationMilliseconds: Int64,
+        contentType: String,
+        container: ProgressiveMediaContainer
+    ) {
+        self.primaryURL = primaryURL
+        self.backupURLs = backupURLs
+        self.contentLength = contentLength
+        self.durationMilliseconds = durationMilliseconds
+        self.contentType = contentType
+        self.container = container
+    }
+
+    public var urlCandidates: [URL] {
+        [primaryURL] + backupURLs
+    }
+}
+
+/// 一次播放只可能持有一种合法媒体，避免空 DASH、双来源或无来源状态。
+public enum PlaybackMedia: Sendable, Equatable {
+    case dash(PlaybackManifest)
+    case progressive(ProgressivePlaybackSource)
+}

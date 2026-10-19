@@ -1,0 +1,520 @@
+import BiliModels
+import BiliNetworking
+import Foundation
+
+/// bridge 准备播放会话的失败：媒体表示缺失或不一致、来源不合规、缺少完整长度与字幕目录问题。
+public enum DASHToHLSBridgeError: Error, Sendable, Equatable {
+    case missingVideoRepresentation
+    case unsupportedAudioTrackCount(Int)
+    case unsupportedAudioTrackRole(String)
+    case invalidAudioTrackSelection(trackID: String, representationID: Int)
+    case invalidMediaKind(expected: MediaKind, actual: MediaKind)
+    case duplicateVideoRepresentationID(Int)
+    case missingCompleteMediaLength(representationID: Int)
+    case disallowedMediaSource(representationID: Int)
+    case subtitleCatalogTimedOut
+    case inconsistentSubtitleTimeline
+}
+
+/// 一次已启动的 loopback 播放会话；其生命周期就是底层 server 的生命周期。
+///
+/// owner 必须在替换播放项或失败时调用 `stop`；`deinit` 只是最后一道幂等清理保障。
+public final class PreparedPlaybackAsset: Sendable {
+    public let url: URL
+    private let server: LoopbackPlaybackServer
+
+    fileprivate init(
+        url: URL,
+        server: LoopbackPlaybackServer
+    ) {
+        self.url = url
+        self.server = server
+    }
+
+    deinit {
+        server.stop()
+    }
+
+    public func stop() {
+        server.stop()
+    }
+}
+
+/// 把 DASH 或单文件 progressive Range 语义转换为 AVPlayer 可消费的本机播放会话。
+///
+/// Bridge 只构造内存 playlist 与按需代理，不下载完整媒体；任一步失败都会停止已启动 server。
+public struct DASHToHLSBridge: Sendable {
+    let indexLoader: RepresentationIndexLoader
+    let audioFormatLoader: AudioFormatMetadataLoader
+    private let mediaPlaylistBuilder: HLSMediaPlaylistBuilder
+    private let iFramePlaylistBuilder: HLSIFramePlaylistBuilder
+    let subtitlePlaylistBuilder: HLSSubtitlePlaylistBuilder
+    private let masterPlaylistBuilder: HLSMasterPlaylistBuilder
+    let webVTTEncoder: WebVTTEncoder
+    private let serverFactory: @Sendable () -> LoopbackPlaybackServer
+
+    public init() {
+        // 同一 bridge 的 SIDX／init 读取与所有播放会话的分段转发共用一个媒体 Range 会话，起播与
+        // 切换清晰度时复用 CDN 连接；server 停止只取消自己的在途请求。
+        let rangeStreamer = HTTPRangeStreamingClient()
+        self.init(
+            rangeClient: HTTPRangeClient(streamer: rangeStreamer),
+            serverFactory: { LoopbackPlaybackServer(rangeStreamer: rangeStreamer) }
+        )
+    }
+
+    /// 媒体索引就绪后最多再等字幕目录这么久，超时按无字幕起播：加长会推迟首帧，缩短会在慢网下
+    /// 丢掉本可显示的字幕。
+    static let subtitleCatalogGrace: Duration = .seconds(2)
+
+    /// `rangeClient` 负责 SIDX／init 读取，`serverFactory` 为每次 prepare 建一个 loopback server，
+    /// 二者应共用同一媒体 Range 会话（见 `init()`）。
+    init(
+        rangeClient: HTTPRangeClient,
+        serverFactory: @escaping @Sendable () -> LoopbackPlaybackServer
+    ) {
+        indexLoader = RepresentationIndexLoader(rangeClient: rangeClient)
+        audioFormatLoader = AudioFormatMetadataLoader(rangeClient: rangeClient)
+        mediaPlaylistBuilder = HLSMediaPlaylistBuilder()
+        iFramePlaylistBuilder = HLSIFramePlaylistBuilder()
+        subtitlePlaylistBuilder = HLSSubtitlePlaylistBuilder()
+        masterPlaylistBuilder = HLSMasterPlaylistBuilder()
+        webVTTEncoder = WebVTTEncoder()
+        self.serverFactory = serverFactory
+    }
+
+    /// 在同一个 loopback owner 中登记 progressive MP4；正文由 server 按 AVPlayer 的单 Range
+    /// 逐块转发，不在 bridge 或 server 中缓存完整媒体。
+    public func prepare(
+        progressive source: ProgressivePlaybackSource,
+        headers: [String: String] = [:]
+    ) async throws -> PreparedPlaybackAsset {
+        let server = serverFactory()
+        do {
+            try await server.start()
+            let resource = try LoopbackProgressiveResource(
+                candidateURLs: source.urlCandidates,
+                contentLength: source.contentLength,
+                contentType: source.contentType,
+                // 源声明为 MP4 容器且全部候选 URL 的扩展名都是 `.mp4`，才算有容器证据。
+                allowsOctetStreamWithContainerEvidence:
+                    source.container == .mp4
+                    && source.urlCandidates.allSatisfy {
+                        $0.pathExtension.lowercased() == "mp4"
+                    },
+                headers: headers
+            )
+            let localURL = try server.register(
+                .progressive(resource),
+                at: "progressive/media.mp4"
+            )
+            return PreparedPlaybackAsset(url: localURL, server: server)
+        } catch {
+            server.stop()
+            throw error
+        }
+    }
+
+    /// 并行解析各 representation，注册随机 loopback route，并返回会话 owner。
+    func prepare(
+        videos: [MediaRepresentation],
+        audioTracks: [SelectedPlaybackAudioTrack],
+        headers: [String: String],
+        subtitleSource: NativeSubtitleSource?,
+        startPositionSeconds: Double? = nil
+    ) async throws -> PreparedPlaybackAsset {
+        guard !videos.isEmpty else {
+            throw DASHToHLSBridgeError.missingVideoRepresentation
+        }
+        var videoIDs = Set<Int>()
+        for video in videos {
+            guard video.kind == .video else {
+                throw DASHToHLSBridgeError.invalidMediaKind(
+                    expected: .video,
+                    actual: video.kind
+                )
+            }
+            guard videoIDs.insert(video.id).inserted else {
+                throw DASHToHLSBridgeError.duplicateVideoRepresentationID(
+                    video.id
+                )
+            }
+        }
+        // 非空、ID 唯一、恰好一条默认轨与音频 representation 由 AVPlayerEngine 在释放旧 item 前验证；
+        // 这里只守住 bridge 自己的 HLS 角色约束。
+        for selectedAudio in audioTracks {
+            guard
+                selectedAudio.track.representations.contains(
+                    selectedAudio.representation
+                )
+            else {
+                throw DASHToHLSBridgeError.invalidAudioTrackSelection(
+                    trackID: selectedAudio.track.id,
+                    representationID: selectedAudio.representation.id
+                )
+            }
+            switch selectedAudio.track.role {
+            case .original:
+                guard selectedAudio.track.isDefault,
+                    selectedAudio.track.isAutoselect
+                else {
+                    throw DASHToHLSBridgeError.unsupportedAudioTrackRole(
+                        selectedAudio.track.id
+                    )
+                }
+            case .machineGenerated:
+                guard !selectedAudio.track.isDefault,
+                    selectedAudio.track.languageTag != nil
+                else {
+                    throw DASHToHLSBridgeError.unsupportedAudioTrackRole(
+                        selectedAudio.track.id
+                    )
+                }
+            }
+        }
+
+        // SIDX 读取就是首个上游连接；此前复核每个候选来源，失败关闭，见 SECURITY-MODEL §4。
+        let mediaURLPolicy = BiliMediaCDNURLPolicy()
+        for representation in videos + audioTracks.map(\.representation)
+        where !representation.urlCandidates.allSatisfy(mediaURLPolicy.allows) {
+            throw DASHToHLSBridgeError.disallowedMediaSource(
+                representationID: representation.id
+            )
+        }
+
+        let catalogTask = subtitleSource.map { source in
+            Task { try await source.catalog() }
+        }
+        defer { catalogTask?.cancel() }
+
+        async let audioRenditionsTask = loadAudioRenditions(
+            audioTracks,
+            headers: headers
+        )
+        async let loadedVideoVariants = loadVideoVariants(
+            videos,
+            headers: headers
+        )
+        let loadedAudioRenditions = try await audioRenditionsTask
+        let videoVariants = try await loadedVideoVariants
+        let subtitleCatalog = try await freezeCatalog(catalogTask)
+        guard
+            let canonicalAudio = loadedAudioRenditions.first(where: {
+                $0.selectedTrack.track.isDefault
+            })
+        else {
+            throw DASHToHLSBridgeError.unsupportedAudioTrackCount(0)
+        }
+        let audioRenditions = loadedAudioRenditions.filter { rendition in
+            rendition.selectedTrack.track.isDefault
+                || hasMatchingAudioTimeline(
+                    rendition.index.index,
+                    canonical: canonicalAudio.index.index
+                )
+        }
+
+        let server = serverFactory()
+        do {
+            try await server.start()
+            let masterURL = try server.url(for: "master.m3u8")
+            let localizedRenditionNamesURL = try server.url(
+                for: "metadata/localized-rendition-names.json"
+            )
+            var registrations: [LoopbackRouteRegistration] = []
+            var hlsAudioRenditions: [HLSAudioRendition] = []
+            hlsAudioRenditions.reserveCapacity(audioRenditions.count)
+            for (offset, loadedAudio) in audioRenditions.enumerated() {
+                let audio = loadedAudio.selectedTrack.representation
+                guard let audioLength = loadedAudio.index.completeMediaLength else {
+                    throw DASHToHLSBridgeError.missingCompleteMediaLength(
+                        representationID: audio.id
+                    )
+                }
+                let audioPlaylistPath = "audio/\(offset)/\(audio.id).m3u8"
+                let audioPlaylistURL = try server.url(for: audioPlaylistPath)
+                let audioMediaPath = "media/audio/\(offset)/\(audio.id).mp4"
+                let audioMediaURL = try server.url(for: audioMediaPath)
+                registrations.append(
+                    LoopbackRouteRegistration(
+                        relativePath: audioMediaPath,
+                        resource: .remote(
+                            try LoopbackRemoteResource(
+                                sourceURL: loadedAudio.index.sourceURL,
+                                contentLength: audioLength,
+                                contentType: audio.mimeType,
+                                headers: headers
+                            )
+                        )
+                    )
+                )
+                let audioPlaylist = try mediaPlaylistBuilder.build(
+                    representation: audio,
+                    index: loadedAudio.index.index,
+                    mediaURI: audioMediaURL
+                )
+                registrations.append(
+                    LoopbackRouteRegistration(
+                        relativePath: audioPlaylistPath,
+                        resource: playlistResource(audioPlaylist)
+                    )
+                )
+                hlsAudioRenditions.append(
+                    HLSAudioRendition(
+                        selectedTrack: loadedAudio.selectedTrack,
+                        channelCount: loadedAudio.format?.channelCount,
+                        bitDepth: loadedAudio.format?.bitDepth,
+                        sampleRate: loadedAudio.format?.sampleRate,
+                        index: loadedAudio.index.index,
+                        playlistURI: audioPlaylistURL
+                    )
+                )
+            }
+            var variants: [HLSVideoVariant] = []
+            variants.reserveCapacity(videoVariants.count)
+            var iFrameVariants: [HLSIFrameVariant] = []
+            iFrameVariants.reserveCapacity(videoVariants.count)
+            for loadedVideo in videoVariants {
+                let video = loadedVideo.representation
+                let videoIndex = loadedVideo.index
+                let videoPlaylistURL = try server.url(
+                    for: "video/\(video.id).m3u8"
+                )
+                let videoMediaPath = "media/video/\(video.id).mp4"
+                let videoMediaURL = try server.url(for: videoMediaPath)
+                registrations.append(
+                    LoopbackRouteRegistration(
+                        relativePath: videoMediaPath,
+                        resource: .remote(
+                            try LoopbackRemoteResource(
+                                sourceURL: videoIndex.sourceURL,
+                                contentLength: loadedVideo.completeMediaLength,
+                                contentType: video.mimeType,
+                                headers: headers
+                            )
+                        )
+                    )
+                )
+                var initializationURI:URL?
+                if let data=video.initializationOverride {
+                    let path="init/video/\(video.id).mp4"
+                    initializationURI=try server.url(for:path)
+                    registrations.append(LoopbackRouteRegistration(relativePath:path,resource:.inMemory(data:data,contentType:"video/mp4")))
+                }
+                let videoPlaylist = try mediaPlaylistBuilder.build(
+                    representation: video,
+                    index: videoIndex.index,
+                    mediaURI: videoMediaURL,
+                    initializationURI:initializationURI
+                )
+                registrations.append(
+                    LoopbackRouteRegistration(
+                        relativePath: "video/\(video.id).m3u8",
+                        resource: playlistResource(videoPlaylist)
+                    )
+                )
+                variants.append(
+                    HLSVideoVariant(
+                        representation: video,
+                        index: videoIndex.index,
+                        playlistURI: videoPlaylistURL
+                    )
+                )
+                if video.initializationOverride == nil && isEligibleForIFramePlaylist(videoIndex.index) {
+                    let iFramePlaylistPath = "video/\(video.id)-iframe.m3u8"
+                    let iFramePlaylistURL = try server.url(
+                        for: iFramePlaylistPath
+                    )
+                    let iFramePlaylist = try iFramePlaylistBuilder.build(
+                        representation: video,
+                        index: videoIndex.index,
+                        mediaURI: videoMediaURL
+                    )
+                    registrations.append(
+                        LoopbackRouteRegistration(
+                            relativePath: iFramePlaylistPath,
+                            resource: playlistResource(iFramePlaylist)
+                        )
+                    )
+                    iFrameVariants.append(
+                        HLSIFrameVariant(
+                            representation: video,
+                            index: videoIndex.index,
+                            playlistURI: iFramePlaylistURL
+                        )
+                    )
+                }
+            }
+
+            let mediaRegistrationCount = registrations.count
+            let masterPlaylist: String
+            let localizedSubtitleCatalog: [NativeSubtitleCatalogEntry]
+            do {
+                let subtitleRenditions = try makeSubtitleRoutes(
+                    catalog: subtitleCatalog,
+                    source: subtitleSource,
+                    videoIndices: videoVariants.map(\.index.index),
+                    registrations: &registrations,
+                    server: server
+                )
+                masterPlaylist = try masterPlaylistBuilder.build(
+                    videoVariants: variants,
+                    audioRenditions: hlsAudioRenditions,
+                    subtitleRenditions: subtitleRenditions,
+                    iFrameVariants: iFrameVariants,
+                    localizedRenditionNamesURI: localizedRenditionNamesURL,
+                    startOffsetSeconds: startPositionSeconds
+                )
+                localizedSubtitleCatalog = subtitleCatalog
+            } catch {
+                // 字幕 route 或带字幕的 master 生成失败只放弃字幕，按无字幕重新生成 master；
+                // 这次再失败才让播放失败。
+                registrations.removeSubrange(mediaRegistrationCount...)
+                masterPlaylist = try masterPlaylistBuilder.build(
+                    videoVariants: variants,
+                    audioRenditions: hlsAudioRenditions,
+                    iFrameVariants: iFrameVariants,
+                    localizedRenditionNamesURI: localizedRenditionNamesURL,
+                    startOffsetSeconds: startPositionSeconds
+                )
+                localizedSubtitleCatalog = []
+            }
+            registrations.append(
+                LoopbackRouteRegistration(
+                    relativePath: "metadata/localized-rendition-names.json",
+                    resource: try localizedRenditionNamesResource(
+                        audioTracks: audioRenditions.map(\.selectedTrack.track),
+                        subtitleCatalog: localizedSubtitleCatalog
+                    )
+                )
+            )
+            registrations.append(
+                LoopbackRouteRegistration(
+                    relativePath: "master.m3u8",
+                    resource: playlistResource(masterPlaylist)
+                )
+            )
+            _ = try server.register(registrations)
+
+            return PreparedPlaybackAsset(
+                url: masterURL,
+                server: server
+            )
+        } catch {
+            server.stop()
+            throw error
+        }
+    }
+
+    /// 只有全部 reference 从 type-1 SAP 开始且 `SAP_delta_time` 为 0 时才发布 I-frame rendition。
+    private func isEligibleForIFramePlaylist(_ index: SegmentIndex) -> Bool {
+        !index.references.isEmpty
+            && index.references.allSatisfy { reference in
+                reference.startsWithSAP
+                    && reference.sapType == 1
+                    && reference.sapDeltaTime == 0
+            }
+    }
+
+    func hasMatchingSubtitleTimeline(
+        _ candidate: SegmentIndex,
+        canonical: SegmentIndex
+    ) -> Bool {
+        hasMatchingTimelineOrigin(candidate, canonical: canonical)
+    }
+
+    func hasMatchingAudioTimeline(
+        _ candidate: SegmentIndex,
+        canonical: SegmentIndex
+    ) -> Bool {
+        hasMatchingTimelineOrigin(candidate, canonical: canonical)
+    }
+
+    /// 两份 SIDX 的起始呈现时间换算成秒后相差不超过 1/90000 秒（HLS 90 kHz 时钟的一个 tick）
+    /// 即视为同一起点。
+    private func hasMatchingTimelineOrigin(
+        _ candidate: SegmentIndex,
+        canonical: SegmentIndex
+    ) -> Bool {
+        guard candidate.timescale > 0, canonical.timescale > 0 else {
+            return false
+        }
+        let canonicalStart =
+            Double(canonical.earliestPresentationTime)
+            / Double(canonical.timescale)
+        let candidateStart =
+            Double(candidate.earliestPresentationTime)
+            / Double(candidate.timescale)
+        return abs(candidateStart - canonicalStart) <= 1.0 / 90_000.0
+    }
+
+    /// 并行读取各档视频 SIDX；某一档失败（全部候选失败或缺少完整长度）时丢弃该档，只要还有一档
+    /// 可用就继续播放。
+    ///
+    /// 与 AI 配音一致，附加内容失败不拖垮播放。取消原样传播，不当成某一档失败；全部失败时抛出排在
+    /// 最前的那一档的错误。
+    private func loadVideoVariants(
+        _ videos: [MediaRepresentation],
+        headers: [String: String]
+    ) async throws -> [LoadedVideoVariant] {
+        try await withThrowingTaskGroup(
+            of: (Int, Result<LoadedVideoVariant, any Error>).self
+        ) { group in
+            for (offset, video) in videos.enumerated() {
+                group.addTask {
+                    do {
+                        let index = try await indexLoader.load(
+                            for: video,
+                            headers: headers
+                        )
+                        guard let completeMediaLength = index.completeMediaLength else {
+                            throw DASHToHLSBridgeError.missingCompleteMediaLength(
+                                representationID: video.id
+                            )
+                        }
+                        return (
+                            offset,
+                            .success(
+                                LoadedVideoVariant(
+                                    representation: video,
+                                    index: index,
+                                    completeMediaLength: completeMediaLength
+                                )
+                            )
+                        )
+                    } catch {
+                        if Task.isCancelled || error is CancellationError {
+                            throw CancellationError()
+                        }
+                        return (offset, .failure(error))
+                    }
+                }
+            }
+
+            var ordered = [Result<LoadedVideoVariant, any Error>?](
+                repeating: nil,
+                count: videos.count
+            )
+            for try await (offset, result) in group {
+                ordered[offset] = result
+            }
+            let loaded = ordered.compactMap { try? $0?.get() }
+            if loaded.isEmpty, case .failure(let error)? = ordered.first {
+                throw error
+            }
+            return loaded
+        }
+    }
+
+    func playlistResource(_ playlist: String) -> LoopbackPlaybackResource {
+        .inMemory(
+            data: Data(playlist.utf8),
+            contentType: "application/vnd.apple.mpegurl"
+        )
+    }
+}
+
+private struct LoadedVideoVariant: Sendable {
+    let representation: MediaRepresentation
+    let index: LoadedSegmentIndex
+    let completeMediaLength: Int64
+}

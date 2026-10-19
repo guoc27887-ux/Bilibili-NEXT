@@ -1,0 +1,221 @@
+import BiliModels
+import Foundation
+
+/// 从当前详情与当前播放器 item 共同解析出的非秘密写入目标。
+public struct WatchProgressTarget: Sendable, Equatable {
+    public let aid: Int64
+    public let identity: PlaybackItemIdentity
+    public let loadIntent: PlaybackLoadIntent
+
+    public init?(
+        aid: Int64,
+        identity: PlaybackItemIdentity,
+        loadIntent: PlaybackLoadIntent
+    ) {
+        guard aid > 0, identity.cid > 0, !identity.bvid.isEmpty else { return nil }
+        self.aid = aid
+        self.identity = identity
+        self.loadIntent = loadIntent
+    }
+}
+
+/// Bilibili Web 播放器当前使用的 heartbeat 动作。
+public enum WatchProgressEvent: Int, Sendable, Equatable {
+    case periodic = 0
+    case started = 1
+    case paused = 2
+    case resumed = 3
+    case ended = 4
+}
+
+/// 一次进程内播放会话的非秘密协议事实；不持久化，也不包含账户身份或凭据。
+public struct WatchProgressReport: Sendable, Equatable {
+    public let target: WatchProgressTarget
+    public let event: WatchProgressEvent
+    public let sessionStartTimestamp: Int64
+    public let sessionID: String
+    public let generation: UInt64
+    public let sequence: UInt64
+    public let positionSeconds: Int
+    public let maximumPositionSeconds: Int
+    public let durationSeconds: Int?
+    public let elapsedSeconds: Int
+    public let playedSeconds: Int
+    public let completed: Bool
+
+    public init?(
+        target: WatchProgressTarget,
+        event: WatchProgressEvent,
+        sessionStartTimestamp: Int64,
+        sessionID: String,
+        generation: UInt64,
+        sequence: UInt64,
+        positionSeconds: Double,
+        maximumPositionSeconds: Double,
+        durationSeconds: Double?,
+        elapsedSeconds: Double,
+        playedSeconds: Double,
+        completed: Bool
+    ) {
+        guard sessionStartTimestamp > 0,
+            Self.isValidSessionID(sessionID),
+            generation > 0,
+            sequence > 0,
+            !completed || event == .ended,
+            positionSeconds.isFinite,
+            maximumPositionSeconds.isFinite,
+            elapsedSeconds.isFinite,
+            playedSeconds.isFinite,
+            positionSeconds >= 0,
+            maximumPositionSeconds >= positionSeconds,
+            elapsedSeconds >= 0,
+            playedSeconds >= 0
+        else { return nil }
+
+        let validDuration = durationSeconds.flatMap { value -> Double? in
+            guard value.isFinite, value > 0 else { return nil }
+            return value
+        }
+        let boundedPosition =
+            validDuration.map { min(positionSeconds, $0) }
+            ?? positionSeconds
+        let boundedMaximum =
+            validDuration.map {
+                min(max(maximumPositionSeconds, boundedPosition), $0)
+            } ?? max(maximumPositionSeconds, boundedPosition)
+        guard boundedPosition <= Double(Int.max),
+            boundedMaximum <= Double(Int.max),
+            elapsedSeconds <= Double(Int.max),
+            playedSeconds <= Double(Int.max),
+            validDuration.map({ $0 <= Double(Int.max) }) ?? true
+        else { return nil }
+
+        self.target = target
+        self.event = event
+        self.sessionStartTimestamp = sessionStartTimestamp
+        self.sessionID = sessionID
+        self.generation = generation
+        self.sequence = sequence
+        self.positionSeconds = Int(boundedPosition.rounded(.down))
+        self.maximumPositionSeconds = Int(boundedMaximum.rounded(.down))
+        self.durationSeconds = validDuration.map { Int($0.rounded(.down)) }
+        self.elapsedSeconds = Int(elapsedSeconds.rounded(.down))
+        self.playedSeconds = Int(playedSeconds.rounded(.down))
+        self.completed = completed
+    }
+
+    private static func isValidSessionID(_ value: String) -> Bool {
+        value.count == 32
+            && value.allSatisfy {
+                $0.isASCII && ($0.isNumber || ("a"..."f").contains(String($0)))
+            }
+    }
+}
+
+/// 观看进度写入的失败分类，由 BiliAPI 的 `BiliWatchProgressRepository` 从 `BiliAPIError.Failure`
+/// 映射。
+///
+/// 任何失败都只关闭匹配的报告会话（`WatchProgressSession`），不触发账户复核，也不重试，见
+/// SECURITY-MODEL §3。
+public enum WatchProgressError: Error, Sendable, Equatable {
+    case authenticationRequired
+    case authenticationInvalid
+    case requestRestricted
+    case serviceRejected(code: Int)
+    case unavailable
+    case invalidResponse
+}
+
+/// 观看进度 heartbeat 的写入 port，是应用唯一的写能力。
+///
+/// 底层实现是 BiliAPI 的 `BiliWatchProgressRepository`，由 `ProcessComposition` 包进进程唯一的
+/// `SerializedWatchProgressRepository` 后交给各窗口的 `WatchProgressSession`。失败抛出
+/// `WatchProgressError`，取消原样传播为 `CancellationError`；调用方不得重试，
+/// 也不得持久化待发送的报告，见 SECURITY-MODEL §3。
+public protocol WatchProgressRepository: Sendable {
+    func report(_ progress: WatchProgressReport) async throws
+}
+
+/// 进程级 writer：所有窗口最多一个在途写入；认证代次变化会取消全部旧等待者。
+///
+/// 每个窗口 session 自身最多向这里提交一个调用，因此等待规模由存活窗口数而不是播放事件数决定。
+///
+/// 由 `ProcessComposition.installWatchProgressWriter` 创建并登记为账户会话失效者；actor 隔离。
+/// 拥有写入队列与认证代次，不拥有报告的合并与关闭（各窗口的 `WatchProgressSession`），也不拥有底层
+/// transport 的取消（由 `installWatchProgressWriter` 另行登记）。
+public actor SerializedWatchProgressRepository: WatchProgressRepository,
+    AuthenticatedSessionInvalidating
+{
+    private let base: any WatchProgressRepository
+    /// 队尾：最近登记的写入结束（成功或失败）后才结束的 Task；新写入先等它，形成 FIFO 串行。
+    private var tail: Task<Void, Never>?
+    /// 已登记、尚未结束的写入；会话失效时全部取消，每个写入结束时自行移除。
+    private var operations: [UUID: Task<Void, Error>] = [:]
+    /// 认证代次：`invalidateAuthenticatedSession` 时以 `&+=` 递增。
+    ///
+    /// 写入登记时记下当时的值，开始发送前与发送完成后各比对一次，不匹配就抛出 `CancellationError`：
+    /// 排队中的写入不再发出；在途写入随 Task 取消，并由同时登记的 transport 失效取消，
+    /// 即使已送达也不报告成功。
+    private var authenticationGeneration: UInt64 = 0
+
+    public init(base: any WatchProgressRepository) {
+        self.base = base
+    }
+
+    public func report(_ progress: WatchProgressReport) async throws {
+        let operation = enqueue(progress)
+        try await withTaskCancellationHandler {
+            try await operation.value
+        } onCancel: {
+            operation.cancel()
+        }
+    }
+
+    /// 在任何挂起点之前登记写入并排到队尾；认证代次失效会取消所有已登记的写入。
+    func enqueue(_ progress: WatchProgressReport) -> Task<Void, Error> {
+        let operationID = UUID()
+        let predecessor = tail
+        let expectedGeneration = authenticationGeneration
+        let base = base
+        let operation = Task {
+            defer { operations[operationID] = nil }
+            if let predecessor {
+                await predecessor.value
+            }
+            try Task.checkCancellation()
+            try self.requireAuthenticationGeneration(expectedGeneration)
+            try await base.report(progress)
+            try self.requireAuthenticationGeneration(expectedGeneration)
+        }
+        operations[operationID] = operation
+        tail = Task { _ = try? await operation.value }
+        return operation
+    }
+
+    public func invalidateAuthenticatedSession() {
+        authenticationGeneration &+= 1
+        for operation in operations.values {
+            operation.cancel()
+        }
+    }
+
+    private func requireAuthenticationGeneration(_ expected: UInt64) throws {
+        guard expected == authenticationGeneration else {
+            throw CancellationError()
+        }
+    }
+}
+
+/// 把观看进度报告交给写入 port 的用例；报告的合法性已由 `WatchProgressReport` 的初始化校验，
+/// 这里不另加规则。
+public struct WatchProgressUseCase: Sendable {
+    private let repository: any WatchProgressRepository
+
+    public init(repository: any WatchProgressRepository) {
+        self.repository = repository
+    }
+
+    public func report(_ progress: WatchProgressReport) async throws {
+        try await repository.report(progress)
+    }
+}

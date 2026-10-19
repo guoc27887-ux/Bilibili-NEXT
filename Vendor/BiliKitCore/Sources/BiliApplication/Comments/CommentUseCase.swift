@@ -1,0 +1,94 @@
+import BiliModels
+
+/// 评论读取的一次性用例：主评论按已显示的 ID 去重并判定分页终止，楼中楼校验页码与页大小，
+/// 并校验响应与请求衔接。
+///
+/// 不拥有 Task、分页状态与并发上限（`PlaybackCommentsViewModel`）；adapter 调用前后都检查取消，
+/// 被取消的请求抛出 `CancellationError` 而不返回结果。
+public struct CommentUseCase: Sendable {
+    private let repository: any CommentRepository
+
+    public init(repository: any CommentRepository) {
+        self.repository = repository
+    }
+
+    public func loadRoots(
+        for subject: CommentSubjectIdentity,
+        sort: CommentSort,
+        after continuation: CommentContinuation? = nil,
+        excluding existingIDs: Set<CommentID> = []
+    ) async throws -> CommentRootBatch {
+        try Task.checkCancellation()
+        let page = try await repository.rootComments(
+            for: subject,
+            sort: sort,
+            after: continuation
+        )
+        try Task.checkCancellation()
+
+        var seen = existingIDs
+        let uniqueThreads = page.threads.filter { seen.insert($0.id).inserted }
+        let termination: CommentPaginationTermination?
+        if page.isEnd || page.continuation == nil {
+            termination = .serverEnd
+        } else if page.threads.isEmpty {
+            termination = .emptyPage
+        } else if uniqueThreads.isEmpty {
+            termination = .duplicatePage
+        } else {
+            termination = nil
+        }
+
+        return CommentRootBatch(
+            threads: uniqueThreads,
+            totalCount: page.totalCount,
+            continuation: termination == .serverEnd ? nil : page.continuation,
+            termination: termination
+        )
+    }
+
+    /// 楼中楼一页请求的条数，楼中楼面板也按它推算总页数。
+    ///
+    /// 调大每页更长、翻页更少，响应也更大。
+    public static let replyPageSize = 10
+
+    public func loadReplies(
+        for subject: CommentSubjectIdentity,
+        rootID: CommentID,
+        page: Int
+    ) async throws -> CommentReplyBatch {
+        let pageSize = Self.replyPageSize
+        guard page > 0 else {
+            throw CommentReadError.invalidRequest
+        }
+        try Task.checkCancellation()
+        let result = try await repository.replies(
+            for: subject,
+            rootID: rootID,
+            page: page,
+            pageSize: pageSize
+        )
+        try Task.checkCancellation()
+        guard result.rootID == rootID, result.pageNumber == page,
+            result.pageSize == pageSize, result.totalCount >= 0
+        else {
+            throw CommentReadError.invalidResponse
+        }
+
+        var seen: Set<CommentID> = []
+        let uniqueReplies = result.replies.filter { seen.insert($0.id).inserted }
+        let finalPage =
+            result.totalCount == 0
+            ? 0
+            : (result.totalCount - 1) / result.pageSize + 1
+        return CommentReplyBatch(
+            rootID: rootID,
+            replies: uniqueReplies,
+            pageNumber: result.pageNumber,
+            pageSize: result.pageSize,
+            totalCount: result.totalCount,
+            isEnd: result.pageNumber >= finalPage
+                || result.replies.isEmpty
+        )
+    }
+}
