@@ -163,7 +163,7 @@ struct ReplyRow: View {
           }
         }
         HStack(spacing: 14) {
-          Text(reply.date, format: AppDateFormat.timestamp)
+          Text(reply.date.formatted(AppDateFormat.timestamp))
           if !reply.location.isEmpty { Text(reply.location) }
           Button {
             Task { await comments.like(reply, aid: aid, api: store.api) }
@@ -418,6 +418,23 @@ struct DanmakuComposer: View {
           Text("顶部").tag(5)
           Text("底部").tag(4)
         }.labelsHidden().frame(width: 90)
+        Menu {
+          Picker("字号", selection: $dm.fontSize) {
+            Text("小").tag(18)
+            Text("标准").tag(25)
+          }
+          Picker("颜色", selection: $dm.color) {
+            Text("白色").tag(0xFFFFFF)
+            Text("红色").tag(0xFF5555)
+            Text("橙色").tag(0xFFAA33)
+            Text("黄色").tag(0xFFFF00)
+            Text("绿色").tag(0x00CC66)
+            Text("蓝色").tag(0x66CCFF)
+            Text("紫色").tag(0xCC66FF)
+          }
+        } label: { Image(systemName: "textformat") }
+          .menuStyle(.borderlessButton).fixedSize().help("发送样式")
+        DanmakuSettingsButton()
         TextField(store.account == nil ? "登录后发送弹幕" : "发一条弹幕", text: $dm.message).textFieldStyle(
           .plain
         ).padding(10).appGlass(12).disabled(
@@ -436,6 +453,15 @@ struct DanmakuComposer: View {
       }
       if dm.items.contains(where: { $0.mode == 8 }) {
         Text("部分旧版代码弹幕暂不支持").font(.caption).foregroundStyle(.secondary)
+      }
+      if dm.specialLoading {
+        HStack(spacing: 8) {
+          ProgressView().controlSize(.small)
+          Text(dm.specialProgress.isEmpty ? "加载高级弹幕" : dm.specialProgress).font(.caption)
+        }.foregroundStyle(.secondary)
+      }
+      if dm.specialError != nil && !dm.specialLoading {
+        Button("重试高级弹幕") { dm.retrySpecial(aid: aid, api: store.api) }.buttonStyle(.glass)
       }
       if let error = dm.sendError ?? dm.error ?? dm.specialError {
         Text(error).font(.caption).foregroundStyle(.secondary)

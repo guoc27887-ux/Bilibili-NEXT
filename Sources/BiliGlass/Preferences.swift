@@ -189,6 +189,8 @@ struct PreferencesView: View {
       sliderRow("文字大小", value:$scale, range:0.5...2, step:0.1, display:"\(scale.formatted(.number.precision(.fractionLength(1))))×")
       sliderRow("滚动时长", value:$duration, range:3...15, step:1, display:"\(Int(duration)) 秒")
       Text("立即应用。高级弹幕保留作者布局；刷新率跟随屏幕。").font(.caption).foregroundStyle(.secondary)
+      Divider()
+      DanmakuFilteringControls()
     }
   }
   private func sliderRow(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double, display: String) -> some View {

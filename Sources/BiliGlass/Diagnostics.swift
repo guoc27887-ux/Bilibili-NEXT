@@ -46,6 +46,12 @@ import Synchronization
       if newFrame { _ = frameOutput.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: &frameTime) }
       let state: [String: Any] = [
         "appActive": NSApp.isActive,
+        "windowGeometry": [
+          "frame": NSApp.mainWindow.map { NSStringFromRect($0.frame) } ?? "",
+          "content": NSApp.mainWindow?.contentView.map { NSStringFromRect($0.frame) } ?? "",
+          "screen": NSApp.mainWindow?.screen.map { NSStringFromRect($0.frame) } ?? "",
+          "fullscreen": store.fullscreen.isPresented,
+        ] as [String: Any],
         "inputIdleSeconds": ProcessInfo.processInfo.systemUptime - lastInput,
         "firstResponder": NSApp.keyWindow?.firstResponder.map { String(describing: type(of: $0)) } ?? "",
         "time": time.isFinite ? time : 0,

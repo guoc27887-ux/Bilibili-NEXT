@@ -74,14 +74,78 @@ struct SpecialDanmakuTests {
   }
   @Test func fullscreenCommentsLeaveRoomForControls() {
     let items = (0..<40).map { Danmaku(id:"\($0)",time:0,mode:5,size:25,color:0,text:"顶部弹幕") }
-    let plan = DanmakuLayout.prepare(items:items,size:CGSize(width:1280,height:720),scale:1,area:1,duration:8,time:0,topInset:76)
+    let plan = DanmakuLayout.prepare(items:items,size:CGSize(width:1280,height:720),scale:1,area:1,duration:8,time:0,topInset:76,bottomInset:100)
     #expect(!plan.isEmpty)
-    #expect(plan.allSatisfy { 76 + CGFloat($0.lane+1)*38 <= 620 })
+    #expect(plan.allSatisfy { $0.y >= 76 && $0.y + $0.height <= 620 })
   }
   @Test func reverseAndBottomDanmakuShareCollisionSpace() {
     let values = (0..<3).map { Danmaku(id:"\($0)",time:Double($0),mode:[1,6,4][$0],size:25,color:0,text:"避免相撞") }
-    let plan = DanmakuLayout.prepare(items:values,size:CGSize(width:800,height:68),scale:1,area:1,duration:8,time:0)
+    let plan = DanmakuLayout.prepare(items:values,size:CGSize(width:800,height:68),scale:1,area:1,duration:8,time:0,options:.init(avoidSubtitles:false))
     #expect(plan.count == 1)
+  }
+  @Test func mixedFontSizesNeverOverlapOrEnterSubtitleArea() {
+    let items = (0..<30).map { Danmaku(id:"\($0)",time:0,mode:4,size:$0 % 2 == 0 ? 36 : 18,color:0xFFFFFF,text:"大字与小字") }
+    let plan = DanmakuLayout.prepare(items:items,size:CGSize(width:1280,height:720),scale:2,area:1,duration:8,time:0)
+      .sorted { $0.y < $1.y }
+    #expect(plan.count > 1)
+    for (a,b) in zip(plan, plan.dropFirst()) { #expect(a.y + a.height <= b.y) }
+    #expect(plan.allSatisfy { $0.y + $0.height <= 720 * 0.85 })
+  }
+  @Test func filtersDoNotAffectAuthorPositionedScripts() {
+    let items = [
+      Danmaku(id:"a",time:0,mode:1,size:25,color:0xFFFFFF,text:"重复"),
+      Danmaku(id:"b",time:1,mode:1,size:25,color:0xFFFFFF,text:"重复"),
+      Danmaku(id:"c",time:1,mode:5,size:25,color:0xFFFFFF,text:"顶部"),
+      Danmaku(id:"d",time:1,mode:1,size:25,color:0xFF0000,text:"红色"),
+      Danmaku(id:"e",time:1,mode:1,size:25,color:0xFFFFFF,text:"屏蔽内容"),
+      Danmaku(id:"f",time:1,mode:9,size:25,color:0xFFFFFF,text:"def text a {content=\"作品\"}"),
+    ]
+    let options = DanmakuDisplayOptions(top:false,colored:false,deduplicate:true,blockedWords:["屏蔽"])
+    let plan = DanmakuLayout.prepare(items:items,size:CGSize(width:1280,height:720),scale:1,area:1,duration:8,time:0,options:options)
+    #expect(plan.map(\.item.id) == ["a"])
+    #expect(SpecialCompilation.compile(items).scripts.map(\.item.id) == ["f"])
+  }
+  @Test func SVGViewBoxPreservesAspectRatioAndScalesStrokes() {
+    let layout = BASPathLayout(box:CGRect(x:0,y:0,width:4000,height:2250),width:1000,height:nil)
+    #expect(layout.size == CGSize(width:1000,height:562.5))
+    #expect(15 * layout.scale == 3.75)
+    let square = BASPathLayout(box:CGRect(x:100,y:50,width:4000,height:2250),width:1000,height:1000)
+    #expect(CGPoint(x:100,y:50).applying(square.transform) == CGPoint(x:0,y:218.75))
+  }
+  @Test @MainActor func SVGTopEdgeStaysAtTheTopWhenComposited() async throws {
+    let renderer = SpecialDanmakuRenderer()
+    renderer.replace(SpecialCompilation.compile([
+      Danmaku(id:"top",time:0,mode:9,size:25,color:0,text:"""
+        def path a {d="M10 10 H40 V30 H10 Z" viewBox="0 0 100 100" width=100 height=100 fillColor=0xff0000 borderWidth=0 duration=4s}
+        """)
+    ]))
+    for _ in 0..<100 {
+      renderer.render(time:1,size:CGSize(width:100,height:100),backingScale:1,opacity:1)
+      if renderer.count > 0 { break }
+      try await Task.sleep(for:.milliseconds(10))
+    }
+    #expect(renderer.count == 1)
+    let context = try #require(CGContext(data:nil,width:100,height:100,bitsPerComponent:8,bytesPerRow:0,
+      space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.premultipliedLast.rawValue))
+    renderer.root.render(in:context)
+    let bitmap = NSBitmapImageRep(cgImage:try #require(context.makeImage()))
+    #expect(try #require(bitmap.colorAt(x:20,y:20)).alphaComponent > 0.9)
+    #expect(try #require(bitmap.colorAt(x:20,y:80)).alphaComponent < 0.1)
+  }
+  @Test func incrementalCompilationKeepsEarlierPackagesAndPreparesUpcomingFrames() throws {
+    let first = Danmaku(id:"first",time:0,mode:9,size:25,color:0,text:"""
+      def path a {d="M0 0 L4000 0 L4000 2250 Z" viewBox="0 0 4000 2250" width=100% alpha=0}
+      set a {} 1s then set a {alpha=1} 0ms then set a {} 1s then set a {alpha=0} 0ms
+      """)
+    let next = Danmaku(id:"second",time:60,mode:9,size:25,color:0,text:"def text t {content=\"下一包\"}")
+    let old = SpecialCompilation.compile([first])
+    let merged = SpecialCompilation.compile([first,next],reusing:old)
+    #expect(merged.scripts.count == 2)
+    let paths = BASGeometry.prepare(merged,time:0,existing:[])
+    #expect(paths.count == 1)
+    #expect(paths.first?.path.boundingBoxOfPath == CGRect(x:0,y:0,width:4000,height:2250))
+    #expect(BASGeometry.prepare(merged,time:0,existing:Set(paths.map(\.id))).isEmpty)
+    #expect(BASGeometry.prepare(merged,time:3,existing:[]).isEmpty)
   }
   @Test func sameCountUpdatesAndDeduplicationKeepSentComments() {
     let a = Danmaku(id:"1",time:1,mode:1,size:25,color:0,text:"一")

@@ -85,11 +85,14 @@ struct ProtoReader {
   var special: [Danmaku] = []
   var specialError: String?
   var specialLoading = false
+  var specialProgress = ""
   var error: String?
   var sending = false
   var sendError: String?
   var message = ""
   var mode = 1
+  var color = 0xFFFFFF
+  var fontSize = 25
   var enabled = UserDefaults.standard.object(forKey: "danmakuEnabled") as? Bool ?? true
   private var segments: [Int: [Danmaku]] = [:]
   private var localSent: [Danmaku] = []
@@ -116,20 +119,7 @@ struct ProtoReader {
       return
     }
     guard cid > 0 else { return }
-    specialLoading = true
-    specialTask = Task {
-      do {
-        let result = try await withDeadline(seconds: 60) { try await api.specialDanmaku(cid: cid, aid: aid) }
-        guard token == current, !Task.isCancelled else { return }
-        special = result
-        needsRebuild = true
-        specialLoading = false
-      } catch {
-        guard token == current, !Task.isCancelled else { return }
-        specialError = "高级弹幕加载失败，重新打开视频可重试"
-        specialLoading = false
-      }
-    }
+    loadSpecial(cid: cid, aid: aid, api: api, current: current)
     task = Task {
       while !Task.isCancelled, token == current {
         let time = player.currentTime().seconds
@@ -177,6 +167,31 @@ struct ProtoReader {
       }
     }
   }
+  func retrySpecial(aid: Int, api: API) {
+    guard cid > 0, !specialLoading else { return }
+    loadSpecial(cid: cid, aid: aid, api: api, current: token)
+  }
+  private func loadSpecial(cid: Int, aid: Int, api: API, current: UUID) {
+    specialTask?.cancel()
+    specialLoading = true
+    specialError = nil
+    specialTask = Task { [self] in
+      do {
+        _ = try await api.specialDanmaku(cid: cid, aid: aid) { batch, completed, total in
+          guard self.token == current, !Task.isCancelled else { return }
+          self.special = Self.merged(self.special + batch)
+          self.specialProgress = "高级弹幕 \(completed)/\(total)"
+          self.needsRebuild = true
+        }
+      } catch {
+        guard token == current, !Task.isCancelled else { return }
+        specialError = special.isEmpty ? "高级弹幕加载失败" : "部分高级弹幕未加载，已加载内容可继续播放"
+      }
+      guard token == current, !Task.isCancelled else { return }
+      specialLoading = false
+      specialProgress = ""
+    }
+  }
   func stop() {
     task?.cancel()
     specialTask?.cancel()
@@ -191,6 +206,7 @@ struct ProtoReader {
     special = []
     specialError = nil
     specialLoading = false
+    specialProgress = ""
     inFlight = []
     items = []
     error = nil
@@ -202,6 +218,7 @@ struct ProtoReader {
     guard !sending, !text.isEmpty, text.count <= 100, cid > 0 else { return }
     let current = token
     let cid = cid
+    let mode = mode, color = color, fontSize = fontSize
     let time = player.currentTime().seconds
     guard time.isFinite else { return }
     sending = true
@@ -212,15 +229,15 @@ struct ProtoReader {
         "/x/v2/dm/post",
         [
           "type": "1", "oid": "\(cid)", "aid": "\(aid)", "msg": text,
-          "progress": "\(max(0,Int(time*1000)))", "color": "16777215", "fontsize": "25",
+          "progress": "\(max(0,Int(time*1000)))", "color": "\(color)", "fontsize": "\(fontSize)",
           "pool": "0", "mode": "\(mode)", "rnd": "\(Int64(Date().timeIntervalSince1970*1_000_000))",
         ])
       guard token == current else { return }
       message = ""
       if d["visible"] as? Bool != false {
         let item = Danmaku(
-            id: d["dmid_str"] as? String ?? UUID().uuidString, time: time, mode: mode, size: 25,
-            color: 16_777_215, text: text)
+            id: d["dmid_str"] as? String ?? UUID().uuidString, time: time, mode: mode, size: fontSize,
+            color: color, text: text)
         localSent.append(item)
         items = Self.merged(items + [item])
       }
@@ -233,7 +250,7 @@ struct ProtoReader {
     }
   }
   static func all(cid: Int, duration: Int, api: API) async throws -> [Danmaku] {
-    var items: [Danmaku] = (try? await api.specialDanmaku(cid: cid)) ?? []
+    var items: [Danmaku] = try await api.specialDanmaku(cid: cid)
     let count = max(1, Int(ceil(Double(duration) / 360)))
     guard count <= 1000 else { throw BiliError(text: "视频过长，请分集下载弹幕") }
     for index in 1...count {
@@ -263,23 +280,61 @@ struct DanmakuPlacement: Sendable {
   let lane: Int
   let width: CGFloat
   let duration: Double
+  let y: CGFloat
+  let fontSize: CGFloat
+  let height: CGFloat
+}
+struct DanmakuDisplayOptions: Sendable {
+  var scrolling = true
+  var top = true
+  var bottom = true
+  var colored = true
+  var avoidSubtitles = true
+  var deduplicate = false
+  var blockedWords: [String] = []
+  func accepts(_ item: Danmaku) -> Bool {
+    guard (1...6).contains(item.mode), colored || item.color == 0xFFFFFF else { return false }
+    guard !blockedWords.contains(where: { !$0.isEmpty && item.text.localizedCaseInsensitiveContains($0) }) else { return false }
+    switch item.mode { case 4: return bottom; case 5: return top; default: return scrolling }
+  }
+  static func read(_ defaults: UserDefaults = .standard) -> Self {
+    func flag(_ key: String, _ fallback: Bool) -> Bool { defaults.object(forKey: key) as? Bool ?? fallback }
+    return Self(scrolling: flag("danmakuScrolling", true), top: flag("danmakuTop", true),
+      bottom: flag("danmakuBottom", true), colored: flag("danmakuColored", true),
+      avoidSubtitles: flag("danmakuAvoidSubtitles", true), deduplicate: flag("danmakuDeduplicate", false),
+      blockedWords: (defaults.string(forKey: "danmakuBlockedWords") ?? "").split(separator: "\n").map(String.init))
+  }
 }
 enum DanmakuLayout {
   static func prepare(
-    items: [Danmaku], size: CGSize, scale: CGFloat, area: CGFloat, duration: Double, time: Double, topInset: CGFloat = 12
+    items: [Danmaku], size: CGSize, scale: CGFloat, area: CGFloat, duration: Double, time: Double,
+    topInset: CGFloat = 12, bottomInset: CGFloat = 12, options: DanmakuDisplayOptions = .init()
   ) -> [DanmakuPlacement] {
-    let scale = max(0.5, scale)
-    let rowHeight = 38 * scale
-    let usableHeight = max(rowHeight, size.height - 100 - topInset)
-    let totalLanes = max(1, Int(usableHeight / rowHeight))
-    let lanes = max(1, min(totalLanes, Int(size.height * area / rowHeight)))
+    guard size.width > 0, size.height > topInset else { return [] }
+    let scale = max(0.5, min(2, scale))
+    let source = items.filter { $0.time >= max(0,time-20) && $0.time <= time+60 && options.accepts($0) }
+      .sorted { $0.time == $1.time ? $0.id < $1.id : $0.time < $1.time }
+    func fontSize(_ item: Danmaku) -> CGFloat { max(12, min(72, CGFloat(max(12, min(36, item.size))) * scale)) }
+    let largest = source.map(fontSize).max() ?? 25 * scale
+    let font = NSFont.systemFont(ofSize: largest, weight: .semibold)
+    let rowHeight = ceil(max(38 * scale, font.ascender - font.descender + font.leading + 8))
+    let bottom = max(bottomInset, options.avoidSubtitles ? size.height * 0.15 : 0)
+    let usableHeight = max(0, size.height - bottom - topInset)
+    let totalLanes = Int(usableHeight / rowHeight)
+    guard totalLanes > 0 else { return [] }
+    let lanes = max(1, min(totalLanes, Int(ceil(CGFloat(totalLanes) * max(0.2, min(1, area))))))
     var occupied = [[DanmakuPlacement]](repeating: [], count: totalLanes)
     var result: [DanmakuPlacement] = []
-    for item in items where item.time >= max(0,time-20) && item.time <= time+60 && (1...6).contains(item.mode) {
-      let font = NSFont.systemFont(ofSize: max(12,min(36,CGFloat(item.size)*scale)), weight: .semibold)
-      let width = ceil((item.text as NSString).size(withAttributes:[.font:font]).width) + 6
+    var lastText: [String: Double] = [:]
+    for item in source {
+      if options.deduplicate, let previous = lastText[item.text], item.time - previous < duration { continue }
+      let pointSize = fontSize(item)
+      let font = NSFont.systemFont(ofSize: pointSize, weight: .semibold)
+      let text = displayText(item.text)
+      let width = ceil((text as NSString).size(withAttributes: [.font: font]).width) + 8
+      let height = ceil(font.ascender - font.descender + font.leading) + 4
       let rolling = ![4,5].contains(item.mode)
-      let life = rolling ? duration : 4
+      let life = rolling ? max(3, duration) : 4
       let candidates = item.mode == 4 ? Array((totalLanes-lanes..<totalLanes).reversed()) : Array(0..<lanes)
       if let lane = candidates.first(where: { lane in
         occupied[lane].removeAll { $0.item.time+$0.duration <= item.time }
@@ -291,11 +346,15 @@ enum DanmakuLayout {
             (velocity <= oldVelocity || velocity*(prior.duration-elapsed) <= size.width-20)
         }
       }) {
-        let placement = DanmakuPlacement(item:item,lane:lane,width:width,duration:life)
-        occupied[lane].append(placement); result.append(placement)
+        let placement = DanmakuPlacement(item: item, lane: lane, width: width, duration: life,
+          y: topInset + CGFloat(lane) * rowHeight, fontSize: pointSize, height: height)
+        occupied[lane].append(placement); result.append(placement); lastText[item.text] = item.time
       }
     }
     return result
+  }
+  static func displayText(_ raw: String) -> String {
+    String(raw.prefix(1000)).replacingOccurrences(of: "\n", with: " ").replacingOccurrences(of: "\r", with: " ")
   }
 }
 @MainActor final class SpecialDanmakuCache {
@@ -308,6 +367,7 @@ enum DanmakuLayout {
   private var rateObservation: NSKeyValueObservation?
   private var playerTimeObserver: Any?
   private var visibilityObservers: [NSObjectProtocol] = []
+  private var defaultsObserver: NSObjectProtocol?
   private var wakeTask: Task<Void, Never>?
   private var clockTicks = 0
   var compilationCache: SpecialDanmakuCache?
@@ -318,6 +378,7 @@ enum DanmakuLayout {
   private var specialSource: [Danmaku] = []
   private var plannedSize = CGSize.zero
   var enabled = true { didSet { if enabled != oldValue { refreshClock() } } }
+  var bottomInset: CGFloat = 12 { didSet { if bottomInset != oldValue { invalidatePlan(); lastTime = -1 } } }
   var topInset: CGFloat = 12 { didSet { if topInset != oldValue { invalidatePlan(); lastTime = -1 } } }
   private var frameLink: CADisplayLink?
   @MainActor private final class FrameTarget: NSObject {
@@ -331,7 +392,7 @@ enum DanmakuLayout {
   private var windowStart = -1.0
   private var windowEnd = -1.0
   private var plan: [DanmakuPlacement] = []
-  private var textLayers: [String: CATextLayer] = [:]
+  private var textLayers: [String: CALayer] = [:]
   private var lastTime = -1.0
   private var planning = false
   private var style = ""
@@ -347,6 +408,15 @@ enum DanmakuLayout {
     layer?.masksToBounds = true
     layer?.isGeometryFlipped = true
     layer?.addSublayer(specialRenderer.root)
+    specialRenderer.didPrepare = { [weak self] in self?.lastTime = -1; self?.tick() }
+    defaultsObserver = NotificationCenter.default.addObserver(
+      forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      Task { @MainActor in
+        guard let self, self.style != self.currentStyle else { return }
+        self.refreshClock()
+      }
+    }
     frameTarget.view = self
     let link = displayLink(target: frameTarget, selector: #selector(FrameTarget.frame(_:)))
     link.isPaused = true
@@ -358,6 +428,7 @@ enum DanmakuLayout {
     frameLink?.invalidate()
     wakeTask?.cancel()
     visibilityObservers.forEach { NotificationCenter.default.removeObserver($0) }
+    if let defaultsObserver { NotificationCenter.default.removeObserver(defaultsObserver) }
     if let playerTimeObserver { player?.removeTimeObserver(playerTimeObserver) }
     task?.cancel()
     specialTask?.cancel()
@@ -432,22 +503,32 @@ enum DanmakuLayout {
     let source = items.filter { [7,8,9].contains($0.mode) }
     guard source != specialSource else { return }
     specialSource = source
-    specialTask?.cancel()
-    specialRenderer.replace(SpecialCompilation())
-    if let cache = compilationCache, cache.source == source {
-      specialRenderer.replace(cache.compilation)
-      lastTime = -1
+    if source.isEmpty {
+      specialTask?.cancel(); specialTask = nil
+      specialRenderer.replace(SpecialCompilation())
       return
     }
+    if let cache = compilationCache, cache.source == source {
+      specialTask?.cancel(); specialTask = nil
+      specialRenderer.replace(cache.compilation)
+      lastTime = -1; tick()
+      return
+    }
+    guard specialTask == nil else { return }
     specialTask = Task { [weak self] in
-      let compilation = await Task.detached(priority: .utility) { SpecialCompilation.compile(source) }.value
-      guard let self, !Task.isCancelled else { return }
-      compilationCache?.source = source
-      compilationCache?.compilation = compilation
-      specialRenderer.replace(compilation)
-      onSpecialStatus?(compilation.scripts.count, compilation.unsupported)
-      lastTime = -1
-      tick()
+      while let self, !Task.isCancelled {
+        let pending = specialSource
+        let previous = specialRenderer.compilation
+        let worker = Task.detached(priority: .utility) { SpecialCompilation.compile(pending, reusing: previous) }
+        let compilation = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
+        guard !Task.isCancelled else { return }
+        compilationCache?.source = pending
+        compilationCache?.compilation = compilation
+        specialRenderer.replace(compilation)
+        onSpecialStatus?(compilation.scripts.count, compilation.unsupported)
+        lastTime = -1; tick()
+        if pending == specialSource { specialTask = nil; return }
+      }
     }
   }
   private var textScale: CGFloat {
@@ -459,13 +540,21 @@ enum DanmakuLayout {
     planning = false
     plannedWidth = -1
   }
+  private var currentStyle: String {
+    ["danmakuScale", "danmakuArea", "danmakuDuration", "danmakuOpacity", "danmakuScrolling",
+      "danmakuTop", "danmakuBottom", "danmakuColored", "danmakuAvoidSubtitles",
+      "danmakuDeduplicate", "danmakuBlockedWords"].map {
+        String(describing: UserDefaults.standard.object(forKey: $0))
+      }.joined(separator: ":")
+  }
   private func requestPlan(time: Double) {
     guard !planning, bounds.width > 0, bounds.height > 0 else { return }
     planning = true
     let token = revision
     let source = items
     let size = bounds.size
-    let inset = topInset
+    let inset = topInset, bottom = bottomInset
+    let options = DanmakuDisplayOptions.read()
     let scale = textScale
     let area = max(
       0.2, min(1, UserDefaults.standard.object(forKey: "danmakuArea") as? Double ?? 0.5))
@@ -474,7 +563,7 @@ enum DanmakuLayout {
     task = Task { [weak self] in
       let result = await Task.detached(priority: .userInitiated) {
         DanmakuLayout.prepare(
-          items: source, size: size, scale: scale, area: area, duration: duration, time: time, topInset: inset)
+          items: source, size: size, scale: scale, area: area, duration: duration, time: time, topInset: inset, bottomInset: bottom, options: options)
       }.value
       guard let self, !Task.isCancelled, token == revision else { return }
       guard size == bounds.size else {
@@ -504,9 +593,7 @@ enum DanmakuLayout {
       return
     }
     let defaults = UserDefaults.standard
-    let currentStyle = ["danmakuScale", "danmakuArea", "danmakuDuration", "danmakuOpacity"].map {
-      String(describing: defaults.object(forKey: $0))
-    }.joined(separator: ":")
+    let currentStyle = self.currentStyle
     if currentStyle != style {
       style = currentStyle
       invalidatePlan()
@@ -558,7 +645,7 @@ enum DanmakuLayout {
       guard visible.count < 150 else { break }
       let item = placement.item
       let elapsed = time - item.time
-      let text = item.text
+      let text = DanmakuLayout.displayText(item.text)
       let opacity: Float = 1
       var x: CGFloat
       var y: CGFloat
@@ -567,31 +654,19 @@ enum DanmakuLayout {
         : item.mode == 6
           ? -placement.width+(bounds.width+placement.width)*elapsed/placement.duration
           : bounds.width-(bounds.width+placement.width)*elapsed/placement.duration
-      y = topInset + CGFloat(placement.lane) * 38 * textScale
+      y = placement.y
       visible.insert(item.id)
-      let textLayer: CATextLayer
+      let textLayer: CALayer
       if let existing = textLayers[item.id] {
         textLayer = existing
       } else {
-        textLayer = CATextLayer()
+        textLayer = CALayer()
         textLayer.anchorPoint = .zero
         textLayer.contentsScale = window?.backingScaleFactor ?? 2
-        let font = NSFont.systemFont(
-          ofSize: max(12, min(36, CGFloat(item.size) * textScale)), weight: .semibold)
-        let color = NSColor(
-          srgbRed: CGFloat((item.color >> 16) & 255) / 255,
-          green: CGFloat((item.color >> 8) & 255) / 255, blue: CGFloat(item.color & 255) / 255,
-          alpha: 1)
-        let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.8)
-        shadow.shadowBlurRadius = 1; shadow.shadowOffset = CGSize(width: 0, height: -1)
-        let attributes: [NSAttributedString.Key: Any] = [
-          .font: font, .foregroundColor: color, .shadow: shadow,
-        ]
-        textLayer.string = NSAttributedString(string: text, attributes: attributes)
-        let width = (text as NSString).size(withAttributes: [.font: font]).width
-        textLayer.bounds = CGRect(x: 0, y: 0, width: width + 8, height: font.pointSize * 1.6)
-        // Text and its shadow are drawn together once; motion only composites the bitmap.
+        textLayer.bounds = CGRect(x: 0, y: 0, width: placement.width, height: placement.height)
+        textLayer.contents = DanmakuTextBitmap.make(text: text, fontSize: placement.fontSize, color: item.color,
+          size: textLayer.bounds.size, scale: textLayer.contentsScale)
+        // The outline and solid fill share one cached bitmap, including on a flipped layer.
         layer?.addSublayer(textLayer)
         textLayers[item.id] = textLayer
       }
@@ -636,29 +711,43 @@ extension API {
       host == "hdslb.com" || host.hasSuffix(".hdslb.com"), parts.user == nil, parts.password == nil else { return nil }
     return parts.url
   }
-  func specialDanmaku(cid: Int, aid: Int = 0) async throws -> [Danmaku] {
+  func specialDanmaku(cid: Int, aid: Int = 0,
+    onBatch: (@MainActor ([Danmaku], Int, Int) -> Void)? = nil
+  ) async throws -> [Danmaku] {
     let metadata = try await binary(
       "/x/v2/dm/web/view", ["type": "1", "oid": "\(cid)", "pid": "\(aid)"])
     var reader = ProtoReader(bytes: Array(metadata))
     var urls: [URL] = []
     while let field = try reader.field() {
       if field.0 == 6, let raw = field.2, let text = String(bytes: raw, encoding: .utf8),
-        let url = Self.specialDanmakuURL(text)
-      {
-        urls.append(url)
-      }
+        let url = Self.specialDanmakuURL(text), !urls.contains(url) { urls.append(url) }
     }
     var items: [Danmaku] = []
-    for url in urls.prefix(20) {
+    var failures = 0
+    // Each package has its own deadline. A slow later package never discards earlier data.
+    for (index, url) in urls.prefix(40).enumerated() {
       try Task.checkCancellation()
-      var req = URLRequest(url: url)
-      Self.mediaHeaders.forEach { req.setValue($1, forHTTPHeaderField: $0) }
-      let (data, r) = try await URLSession.shared.data(for: req)
-      guard (r as? HTTPURLResponse)?.statusCode == 200, data.count < 32 * 1024 * 1024 else {
-        continue
+      var batch: [Danmaku]?
+      for _ in 0..<2 {
+        do {
+          batch = try await withDeadline(seconds: 40) {
+            var req = URLRequest(url: url, timeoutInterval: 20)
+            Self.mediaHeaders.forEach { req.setValue($1, forHTTPHeaderField: $0) }
+            let (data, response) = try await self.session.data(for: req)
+            guard (response as? HTTPURLResponse)?.statusCode == 200, data.count < 32 * 1024 * 1024 else {
+              throw BiliError(text: "高级弹幕数据无效")
+            }
+            return try await Task.detached(priority: .utility) { try ProtoReader.decode(data) }.value
+          }
+          break
+        } catch {
+          try Task.checkCancellation()
+        }
       }
-      items += (try? ProtoReader.decode(data)) ?? []
+      if let batch { items += batch } else { failures += 1 }
+      onBatch?(batch ?? [], index + 1, min(40, urls.count))
     }
+    if failures > 0 || urls.count > 40 { throw BiliError(text: "部分高级弹幕加载失败") }
     return items
   }
 }

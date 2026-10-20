@@ -708,6 +708,7 @@ struct NativePlayer: NSViewRepresentable {
     if view.player !== playback.player { view.player = playback.player }
     view.toggleFullscreen = toggleFullscreen
     view.danmaku.topInset = fullscreen ? 76 : 12
+    view.danmaku.bottomInset = fullscreen ? 100 : 12
     view.attachDanmaku()
     view.danmaku.player = playback.player
     if view.danmaku.items != items {

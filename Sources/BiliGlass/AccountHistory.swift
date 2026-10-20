@@ -105,7 +105,7 @@ struct HistoryPage: View {
                     VStack(alignment: .leading, spacing: 8) {
                       VideoCard(video: entry.video, showsViews: false)
                       HStack {
-                        Text(entry.viewedAt, format: AppDateFormat.timestamp)
+                        Text(entry.viewedAt.formatted(AppDateFormat.timestamp))
                         Spacer()
                         Text(entry.progress < 0 ? "已看完" : "看到 \(String(format: "%d:%02d", max(0, entry.progress) / 60, max(0, entry.progress) % 60))")
                       }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12)

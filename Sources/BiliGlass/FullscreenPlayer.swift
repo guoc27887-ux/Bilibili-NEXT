@@ -88,6 +88,7 @@ struct FullscreenPlayerContent: View {
           Text(store.playback.detail?.video.title ?? "播放").font(.headline).lineLimit(1)
           Spacer(minLength:0)
           Toggle("弹幕",isOn:$store.danmaku.enabled).toggleStyle(.switch).fixedSize()
+          DanmakuSettingsButton()
           Button { store.playback.showsDetails.toggle() } label: { Image(systemName: "waveform.path.ecg") }.help("播放详情").accessibilityLabel("播放详情")
           if let streams = store.playback.streams {
             Menu(streams.names[store.playback.selectedQuality] ?? "清晰度") {

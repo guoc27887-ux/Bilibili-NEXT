@@ -69,16 +69,79 @@ struct CompiledSpecial: Sendable {
 struct SpecialCompilation: Sendable {
   var scripts:[CompiledSpecial] = []
   var unsupported = 0
-  static func compile(_ items:[Danmaku]) -> SpecialCompilation {
+  var rejected: Set<String> = []
+  static func compile(_ items:[Danmaku], reusing previous: SpecialCompilation = .init()) -> SpecialCompilation {
     var result = SpecialCompilation()
+    let existing = Dictionary(previous.scripts.map { ($0.item.id, $0) }, uniquingKeysWith: { first, _ in first })
     for item in items where [7,8,9].contains(item.mode) {
       if Task.isCancelled { break }
-      if item.mode == 7, let advanced = AdvancedDanmaku(item.text) {
+      if let ready = existing[item.id], ready.item == item {
+        result.scripts.append(ready)
+      } else if previous.rejected.contains(item.id) {
+        result.rejected.insert(item.id)
+      } else if item.mode == 7, let advanced = AdvancedDanmaku(item.text) {
         result.scripts.append(CompiledSpecial(item:item,advanced:advanced,bas:nil))
       } else if item.mode == 9 {
         do { var parser = try BASParser(item.text); let scene = try parser.parse(); result.scripts.append(CompiledSpecial(item:item,advanced:nil,bas:scene)) }
-        catch { result.unsupported += 1 }
-      } else { result.unsupported += 1 }
+        catch { result.rejected.insert(item.id) }
+      } else { result.rejected.insert(item.id) }
+    }
+    result.unsupported = result.rejected.count
+    return result
+  }
+}
+
+/// SVG's default xMidYMid/meet mapping, including stroke widths in viewBox units.
+struct BASPathLayout {
+  let size: CGSize
+  let transform: CGAffineTransform
+  let scale: CGFloat
+  init(box: CGRect, width: CGFloat?, height: CGFloat?) {
+    let bw = max(0.001, box.width), bh = max(0.001, box.height)
+    let w = max(0.001, width ?? height.map { $0 * bw / bh } ?? bw)
+    let h = max(0.001, height ?? w * bh / bw)
+    size = CGSize(width: w, height: h)
+    scale = min(w / bw, h / bh)
+    transform = CGAffineTransform(translationX: (w - bw * scale) / 2, y: (h - bh * scale) / 2)
+      .scaledBy(x: scale, y: scale).translatedBy(x: -box.minX, y: -box.minY)
+  }
+}
+
+struct PreparedBASPath: @unchecked Sendable {
+  let id: String
+  let path: CGPath
+  let cost: Int
+}
+
+enum BASGeometry {
+  /// Only prepare the nearby animation frames, not hundreds of MB of a whole vector movie.
+  static func prepare(_ compilation: SpecialCompilation, time: Double, existing: Set<String>) -> [PreparedBASPath] {
+    var candidates: [(Double, String, String)] = []
+    for script in compilation.scripts where script.item.time <= time + 2 && script.item.time + script.duration > time {
+      guard let scene = script.bas else { continue }
+      let elapsed = max(0, time - script.item.time)
+      for node in scene.nodes where node.kind == "path" && node.duration > elapsed {
+        let id = script.item.id + ":" + node.name
+        guard !existing.contains(id), let source = node.properties["d"]?.text else { continue }
+        var next = Double.infinity
+        if node.values(at: elapsed, size: .zero)["alpha"]?.scalar ?? 1 > 0.0001 { next = max(time, script.item.time) }
+        for change in node.tracks["alpha"] ?? []
+          where change.start >= elapsed && change.start <= elapsed + 2 && (change.from.scalar > 0.0001 || change.to.scalar > 0.0001) {
+          next = min(next, script.item.time + change.start)
+        }
+        if next.isFinite { candidates.append((next, id, source)) }
+      }
+    }
+    candidates.sort { $0.0 < $1.0 }
+    var result: [PreparedBASPath] = []
+    var cost = 0
+    for (_, id, source) in candidates {
+      if Task.isCancelled { break }
+      guard let path = try? SVGPath.parse(source) else { continue }
+      let estimate = source.utf8.count * 4
+      result.append(PreparedBASPath(id: id, path: path, cost: estimate))
+      cost += estimate
+      if result.count >= 256 || cost >= 48 * 1024 * 1024 { break }
     }
     return result
   }
@@ -90,17 +153,52 @@ struct SpecialCompilation: Sendable {
   private var layers:[String:CALayer] = [:]
   private var visualKeys:[String:String] = [:]
   private var geometries:[String:CGPath] = [:]
+  private var geometryCosts: [String: Int] = [:]
+  private var geometryUse: [String: Double] = [:]
+  private var geometryTask: Task<Void, Never>?
+  private var geometryTime = -Double.infinity
+  private var generation = UUID()
   private var indexedScenes: [String:[String:BASNode]] = [:]
   private var activeButtons:[(CALayer,BASValue)] = []
   var count: Int { layers.count }
   var activate: ((BASValue)->Void)?
+  var didPrepare: (() -> Void)?
   init() { root.isGeometryFlipped = true; root.masksToBounds = true }
+  isolated deinit { geometryTask?.cancel() }
   func replace(_ value: SpecialCompilation) {
-    clear(); compilation = value; geometries = [:]
+    let retained = Set(value.scripts.map { $0.item.id })
+    let sameVideo = compilation.scripts.allSatisfy { retained.contains($0.item.id) }
+    clear(); compilation = value
+    generation = UUID(); geometryTask?.cancel(); geometryTask = nil; geometryTime = -.infinity
+    if !sameVideo { geometries = [:]; geometryCosts = [:]; geometryUse = [:] }
     indexedScenes = Dictionary(uniqueKeysWithValues: value.scripts.compactMap { script in
       guard let bas = script.bas else { return nil }
       return (script.item.id, Dictionary(uniqueKeysWithValues: bas.nodes.map { ($0.name,$0) }))
     })
+  }
+  private func prepareGeometry(at time: Double) {
+    if abs(time - geometryTime) > 3 { geometryTask?.cancel(); geometryTask = nil; generation = UUID() }
+    guard geometryTask == nil, abs(time - geometryTime) >= 0.35 else { return }
+    geometryTime = time
+    let source = compilation, existing = Set(geometries.keys), token = generation
+    geometryTask = Task { [weak self] in
+      let worker = Task.detached(priority: .userInitiated) { BASGeometry.prepare(source, time: time, existing: existing) }
+      let prepared = await withTaskCancellationHandler { await worker.value } onCancel: { worker.cancel() }
+      guard let self, !Task.isCancelled, generation == token else { return }
+      geometryTask = nil
+      for value in prepared {
+        geometries[value.id] = value.path
+        geometryCosts[value.id] = value.cost
+        geometryUse[value.id] = time
+      }
+      var cost = geometryCosts.values.reduce(0, +)
+      for (id, used) in geometryUse.sorted(by: { abs($0.value - time) > abs($1.value - time) })
+        where cost > 96 * 1024 * 1024 && abs(used - time) > 2 && layers[id] == nil {
+        cost -= geometryCosts.removeValue(forKey: id) ?? 0
+        geometries.removeValue(forKey: id); geometryUse.removeValue(forKey: id)
+      }
+      if !prepared.isEmpty { didPrepare?() }
+    }
   }
   func clear() { layers.values.forEach { $0.removeFromSuperlayer() }; layers = [:]; visualKeys = [:]; activeButtons = [] }
   func hit(_ point: CGPoint) -> BASValue? {
@@ -111,6 +209,7 @@ struct SpecialCompilation: Sendable {
   }
   func render(time: Double, size: CGSize, backingScale: CGFloat, opacity: Float) {
     guard !compilation.scripts.isEmpty || !layers.isEmpty else { return }
+    prepareGeometry(at: time)
     root.bounds = CGRect(origin:.zero,size:size); root.position = .zero; root.anchorPoint = .zero
     var live = Set<String>(); activeButtons = []
     for compiled in compilation.scripts where time >= compiled.item.time && time < compiled.item.time+compiled.duration {
@@ -148,22 +247,30 @@ struct SpecialCompilation: Sendable {
           guard n("alpha",1) > 0.0001 else { return }
           let layer: CALayer
           if node.kind == "path" {
+            guard let path = geometries[id], !path.isEmpty else { return }
+            geometryUse[id] = time
             let shape: CAShapeLayer
-            if let existing = layers[id] as? CAShapeLayer { shape = existing } else { shape = CAShapeLayer(); layers[id] = shape }
+            if let existing = layers[id] as? CAShapeLayer { shape = existing } else {
+              shape = CAShapeLayer()
+              // SVG uses a top-left origin. Match the flipped host instead of reflecting
+              // each path inside its bounds when Core Animation composites the layer.
+              shape.isGeometryFlipped = true
+              layers[id] = shape
+            }
             layer = shape
-            let pathString = values["d"]?.text ?? ""
-            if geometries[id] == nil { geometries[id] = try? SVGPath.parse(pathString) }
-            if let path = geometries[id] {
+            do {
               let boxValues = (values["viewBox"]?.text ?? "").split(whereSeparator:{ $0 == " " || $0 == "," }).compactMap { Double($0) }
               let box = boxValues.count == 4 ? CGRect(x:boxValues[0],y:boxValues[1],width:max(0.001,boxValues[2]),height:max(0.001,boxValues[3])) : path.boundingBoxOfPath
-              let width = max(0.001,dimension("width",max(1,box.width))), height = max(0.001,dimension("height",width * box.height/max(0.001,box.width)))
-              var t = CGAffineTransform(scaleX:width/max(0.001,box.width),y:height/max(0.001,box.height)).translatedBy(x:-box.minX,y:-box.minY)
-              let key = "\(width):\(height)"
+              let layout = BASPathLayout(box: box,
+                width: boxValues.count == 4 ? values["width"].map { CGFloat($0.resolved(reference.width)) } : nil,
+                height: boxValues.count == 4 ? values["height"].map { CGFloat($0.resolved(reference.height)) } : nil)
+              var t = layout.transform
+              let key = "\(layout.size)"
               if visualKeys[id] != key { shape.path = path.copy(using:&t); visualKeys[id] = key }
-              shape.bounds = CGRect(x:0,y:0,width:width,height:height)
+              shape.bounds = CGRect(origin: .zero, size: layout.size)
               shape.fillColor = Self.color(Int(n("fillColor",0xFFFFFF)),alpha:n("fillAlpha",1)).cgColor
               shape.strokeColor = Self.color(Int(n("borderColor")),alpha:n("borderAlpha",1)).cgColor
-              shape.lineWidth = min(100,max(0,n("borderWidth")))
+              shape.lineWidth = min(1000,max(0,n("borderWidth"))) * layout.scale
             }
           } else {
             let text = textLayer(id); layer = text
@@ -221,7 +328,7 @@ struct SpecialCompilation: Sendable {
     t = CATransform3DRotate(t,CGFloat(x * .pi/180),1,0,0)
     return CATransform3DScale(t,CGFloat(scale),CGFloat(scale),1)
   }
-  static func color(_ value:Int,alpha:Double=1) -> NSColor {
+  nonisolated static func color(_ value:Int,alpha:Double=1) -> NSColor {
     NSColor(srgbRed:Double((value>>16)&255)/255,green:Double((value>>8)&255)/255,blue:Double(value&255)/255,alpha:min(1,max(0,alpha)))
   }
 }
