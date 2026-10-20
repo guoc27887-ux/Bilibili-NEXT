@@ -163,7 +163,7 @@ struct ReplyRow: View {
           }
         }
         HStack(spacing: 14) {
-          Text(reply.date, format: .dateTime.month().day().hour().minute())
+          Text(reply.date, format: AppDateFormat.timestamp)
           if !reply.location.isEmpty { Text(reply.location) }
           Button {
             Task { await comments.like(reply, aid: aid, api: store.api) }

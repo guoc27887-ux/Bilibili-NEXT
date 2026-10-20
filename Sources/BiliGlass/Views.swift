@@ -473,7 +473,7 @@ struct PlayerPage: View {
             }.buttonStyle(.plain)
             Text(d.video.bvid)
             if let date = d.video.publishedAt {
-              Text("发布于 " + date.formatted(.dateTime.year().month(.twoDigits).day(.twoDigits).hour().minute().locale(Locale(identifier: "zh_CN"))))
+              Text("发布于 " + date.formatted(AppDateFormat.timestamp))
                 .help("发布时间 · 当前时区")
             }
           }.font(.callout).foregroundStyle(.secondary)

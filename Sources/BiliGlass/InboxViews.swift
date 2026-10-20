@@ -218,7 +218,7 @@ struct NativeInboxPage: View {
           Link("查看详情", destination: link).font(.caption)
         }
         }
-        Text(message.date, format: .dateTime.month().day().hour().minute()).font(.caption2)
+        Text(message.date, format: AppDateFormat.timestamp).font(.caption2)
           .foregroundStyle(.secondary)
       }.padding(14).appGlass(18, tint: own ? biliPink.opacity(0.12) : .clear)
       if !own { Spacer(minLength: 50) }
@@ -281,7 +281,7 @@ struct NativeNotificationsPage: View {
                 Text(notice.quote).font(.callout).foregroundStyle(.secondary).lineLimit(4)
               }
               HStack {
-                Text(notice.date, format: .dateTime.month().day().hour().minute()).font(.caption)
+                Text(notice.date, format: AppDateFormat.timestamp).font(.caption)
                   .foregroundStyle(.secondary)
                 Spacer()
                 if let url = notice.url {
