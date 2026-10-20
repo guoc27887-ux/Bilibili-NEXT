@@ -37,9 +37,7 @@ struct CommentsView: View {
       }
       HStack(alignment: .bottom) {
         TextField(store.account == nil ? "登录后发表评论" : "发表评论", text: $comments.draft, axis: .vertical)
-          .lineLimit(2...5).textFieldStyle(.plain).padding(10).glassEffect(
-            .clear, in: .rect(cornerRadius: 12)
-          ).disabled(
+          .lineLimit(2...5).textFieldStyle(.plain).padding(10).appGlass(12).disabled(
             store.account == nil || comments.sending)
         Button(comments.sending ? "发送中" : "发送") {
           if store.account == nil {
@@ -54,6 +52,20 @@ struct CommentsView: View {
         )
       }
       if comments.draft.count > 1000 { Text("评论最多 1000 字").foregroundStyle(.red).font(.caption) }
+      if let submitted = comments.submittedText, let status = comments.submissionStatus {
+        HStack(alignment: .top, spacing: 12) {
+          Image(systemName: "paperplane").foregroundStyle(biliPink)
+          VStack(alignment: .leading, spacing: 6) {
+            Text(status).font(.callout.weight(.medium))
+            Text(submitted).font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            Text("这是本次提交记录，公开显示以服务端为准。").font(.caption).foregroundStyle(.secondary)
+          }
+          Spacer(minLength: 0)
+          Button { comments.submittedText = nil; comments.submissionStatus = nil } label: {
+            Image(systemName: "xmark")
+          }.buttonStyle(.plain).help("收起提交记录")
+        }.padding(14).appGlass(14)
+      }
       if let error = comments.sendError {
         HStack {
           Text(error).foregroundStyle(.red).font(.callout)
@@ -99,7 +111,7 @@ struct CommentsView: View {
         Text("还没有评论").foregroundStyle(.secondary).frame(maxWidth: .infinity).padding(20)
       }
     }.scrollTargetLayout()
-      .task(id: "\(resourceType):\(aid)") { comments.load(aid: aid, type: resourceType, api: store.api) }
+      .task(id: "\(resourceType):\(aid)") { comments.loadIfNeeded(aid: aid, type: resourceType, api: store.api) }
   }
 }
 struct ReplyRow: View {
@@ -122,12 +134,15 @@ struct ReplyRow: View {
         Button(reply.name) { store.showProfile(reply.mid) }.buttonStyle(
           .plain
         ).font(.callout.weight(.semibold)).foregroundStyle(.secondary)
-        Text(reply.message).font(.body).textSelection(.enabled).lineLimit(expandedText ? nil : 8)
+        CommentText(content: reply.textContent).lineLimit(expandedText ? nil : 8)
           .fixedSize(horizontal: false, vertical: true)
         if reply.message.count > 350 || reply.message.split(separator: "\n").count > 8 {
           Button(expandedText ? "收起" : "展开全文") { withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { expandedText.toggle() } }.font(.caption).buttonStyle(
             .plain
           ).foregroundStyle(biliPink)
+        }
+        ForEach(reply.videoLinks, id: \.url) { link in
+          CommentVideoCard(link: link, store: store)
         }
         if !reply.pictures.isEmpty {
           ScrollView(.horizontal) {
@@ -249,7 +264,7 @@ struct ProfilePage: View {
         } else if !loading && error == nil {
           ContentUnavailableView("暂无投稿", systemImage: "play.rectangle")
         }
-      }.padding(6).padding(.vertical, 8)
+      }.padding(AppLayout.pageInset).padding(.vertical, 8)
     }.sheet(item: $spaceSheet) { target in
       VStack(spacing: 12) {
         HStack {
@@ -276,7 +291,7 @@ struct ProfilePage: View {
           width: 84, height: 84
         ).clipShape(Circle())
         VStack(alignment: .leading, spacing: 8) {
-          Text(p.name).font(.system(size: 28, weight: .bold))
+          Text(p.name).font(AppLayout.pageTitle)
           Text("UID " + String(mid)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
             .textSelection(.enabled)
           if !p.bio.isEmpty {
@@ -383,7 +398,7 @@ struct ProfilePage: View {
       try Task.checkCancellation()
       guard token == identity else { return }
       let ids = Set(videos.map(\.id))
-      videos += result.filter { !ids.contains($0.id) }
+      videos += Video.deduplicated(result, excluding: ids)
       page = next
       hasMore = !result.isEmpty && videos.count > ids.count
     } catch is CancellationError {} catch {
@@ -405,7 +420,7 @@ struct DanmakuComposer: View {
         }.labelsHidden().frame(width: 90)
         TextField(store.account == nil ? "登录后发送弹幕" : "发一条弹幕", text: $dm.message).textFieldStyle(
           .plain
-        ).padding(10).glassEffect(.clear, in: .rect(cornerRadius: 12)).disabled(
+        ).padding(10).appGlass(12).disabled(
           store.account == nil || dm.sending)
         Button(dm.sending ? "发送中" : "发送") {
           if store.account == nil {

@@ -99,13 +99,14 @@ struct NativeDynamicsPage: View {
         }
         if loading {
           ProgressView().frame(maxWidth: .infinity).padding(20)
-        } else if hasMore && !items.isEmpty {
-          Button("加载更多动态") { Task { await load(reset: false) } }.buttonStyle(.glass).frame(
-            maxWidth: .infinity)
+        } else if !items.isEmpty {
+          LoadMoreFooter(loading: loading, hasMore: hasMore, error: error, count: items.count, title: "加载更多动态") {
+            Task { await load(reset: false) }
+          }
         } else if items.isEmpty && error == nil {
           ContentUnavailableView("暂无动态", systemImage: "rectangle.stack").frame(maxWidth: .infinity)
         }
-      }.padding(5)
+      }.padding(AppLayout.pageInset)
     }.task(id: mid) { await load(reset: true) }.sheet(item: $detail) { entry in
       NativeDynamicDetail(entry: entry, store: store)
     }
@@ -167,7 +168,7 @@ struct DynamicContent: View {
       }
       if !entry.original.isEmpty {
         Text(entry.original).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
-          .padding(14).glassEffect(.clear, in: .rect(cornerRadius: 14))
+          .padding(14).appGlass(14)
       }
       if let video = entry.video {
         Button {
@@ -179,7 +180,7 @@ struct DynamicContent: View {
             Text(video.title).font(.headline).lineLimit(3).multilineTextAlignment(.leading)
             Spacer(minLength: 0)
             Image(systemName: "play.circle.fill").font(.title)
-          }.padding(12).glassEffect(.clear, in: .rect(cornerRadius: 18))
+          }.padding(12).appGlass(18)
         }.buttonStyle(.plain)
       }
       if !entry.pictures.isEmpty {
@@ -256,7 +257,7 @@ struct NativeRelationsPage: View {
         } else if hasMore {
           Button("加载更多") { Task { await load() } }.buttonStyle(.glass).frame(maxWidth: .infinity)
         }
-      }.padding(5)
+      }.padding(AppLayout.pageInset)
     }.task { await load() }
   }
   private func load() async {
@@ -329,7 +330,7 @@ struct NativeCollectionsPage: View {
         } else if hasMore {
           Button("加载更多") { Task { await load() } }.buttonStyle(.glass).frame(maxWidth: .infinity)
         }
-      }.padding(5)
+      }.padding(AppLayout.pageInset)
     }.task { await load() }.sheet(item: $selected) { collection in
       NativeCollectionVideos(store: store, mid: mid, collection: collection)
     }.onChange(of: store.navigationRevision) { selected = nil }

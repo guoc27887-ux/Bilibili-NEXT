@@ -4,11 +4,18 @@ struct DownloadPage: View {
   @Bindable var store: Store
   @State private var filter = 0
   @State private var deleting: SavedDownload?
+  private var visibleJobs: [DownloadJob] {
+    store.downloads.jobs.filter { !$0.finished && (filter == 0 || ($0.cached ? filter == 1 : filter == 2)) }
+  }
+  private var visibleSaved: [SavedDownload] {
+    store.downloads.saved.filter { filter == 0 || ($0.cached == true ? filter == 1 : filter == 2) }
+  }
   var body: some View {
     ScrollView {
-      VStack(alignment: .leading, spacing: 22) {
+      GlassEffectContainer(spacing: 20) {
+      LazyVStack(alignment: .leading, spacing: 20) {
         HStack {
-          Text("下载").font(.system(size: 28, weight: .bold))
+          Text("下载").font(AppLayout.pageTitle)
           Spacer()
           SettingsLink { Label("下载设置", systemImage: "gearshape") }.buttonStyle(.glass)
         }
@@ -42,9 +49,7 @@ struct DownloadPage: View {
           }.padding(16).floatingGlass(18)
         }
         ForEach(
-          store.downloads.jobs.filter {
-            !$0.finished && (filter == 0 || ($0.cached ? filter == 1 : filter == 2))
-          }
+          visibleJobs
         ) { job in
           HStack(spacing: 16) {
             Thumbnail(url: job.video.cover, mode: .fill).frame(width: 116, height: 72).clipShape(
@@ -75,9 +80,7 @@ struct DownloadPage: View {
           }.padding(16).floatingGlass(22)
         }
         ForEach(
-          store.downloads.saved.filter {
-            filter == 0 || ($0.cached == true ? filter == 1 : filter == 2)
-          }
+          visibleSaved
         ) { entry in
           HStack(spacing: 16) {
             Thumbnail(url: entry.video.cover, mode: .fill).frame(width: 116, height: 72).clipShape(
@@ -110,11 +113,12 @@ struct DownloadPage: View {
             }.menuStyle(.borderlessButton).frame(width: 22)
           }.padding(16).floatingGlass(22)
         }
-        if store.downloads.jobs.isEmpty && store.downloads.saved.isEmpty {
+        if visibleJobs.isEmpty && visibleSaved.isEmpty {
           ContentUnavailableView(
             "还没有下载", systemImage: "arrow.down.circle", description: Text("在播放页选择清晰度后缓存或下载"))
         }
-      }.padding(6).padding(.vertical, 8)
+      }.padding(AppLayout.pageInset).padding(.vertical, 8)
+      }
     }
     .confirmationDialog(
       "将这条缓存移到废纸篓？",

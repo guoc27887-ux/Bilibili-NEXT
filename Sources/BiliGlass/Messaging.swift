@@ -36,6 +36,7 @@ struct PrivateMessage: Identifiable {
   let date: Date
   let retracted: Bool
   var isNotice: Bool = false
+  var share: MessageShare? = nil
   static func parse(_ raw: [String: Any]) -> PrivateMessage? {
     let id =
       (raw["msg_key"] as? NSNumber)?.stringValue ?? raw["msg_key"] as? String
@@ -69,7 +70,8 @@ struct PrivateMessage: Identifiable {
       sender: raw["sender_uid"] as? Int ?? 0, text: text, image: image,
       video: video, link: link?.scheme == "https" ? link : nil,
       date: Date(timeIntervalSince1970: (raw["timestamp"] as? NSNumber)?.doubleValue ?? 0),
-      retracted: retracted, isNotice: type == 18)
+      retracted: retracted, isNotice: type == 18,
+      share: retracted ? nil : MessageShare.parse(object, type: type))
   }
 }
 
@@ -95,6 +97,15 @@ struct PrivateMessage: Identifiable {
       identity = UUID()
       self.systemOnly = systemOnly
       loading = false
+      conversations = []
+      cursor = nil
+      hasMore = false
+      selected = nil
+      threadIdentity = UUID()
+      messages = []
+      loadingMessages = false
+      hasOlder = false
+      messageError = nil
     }
     guard !loading else { return }
     loading = true
@@ -151,6 +162,7 @@ struct PrivateMessage: Identifiable {
     messages = []
     messageError = nil
     loadingMessages = false
+    hasOlder = false
   }
   func loadMessages(api: API, older: Bool = false, markRead: Bool = true) async {
     guard let conversation = selected, !loadingMessages else { return }
@@ -249,6 +261,10 @@ struct PrivateMessage: Identifiable {
     loading = false
     loadingMessages = false
     sending = false
+    cursor = nil
+    hasMore = false
+    hasOlder = false
+    systemOnly = false
     error = nil
     messageError = nil
   }

@@ -20,6 +20,10 @@ struct Video: Identifiable, Codable, Hashable {
   let duration: Int
   let views: Int
   var publishedAt: Date? = nil
+  static func deduplicated(_ videos: [Video], excluding: Set<String> = []) -> [Video] {
+    var seen = excluding
+    return videos.filter { seen.insert($0.id).inserted }
+  }
   static func parse(_ j: [String: Any]) -> Video? {
     guard let bvid = j["bvid"] as? String, bvid.hasPrefix("BV") else { return nil }
     let owner = j["owner"] as? [String: Any] ?? [:]
@@ -160,6 +164,7 @@ final class Vault {
     -> [String: Any]
   {
     try Task.checkCancellation()
+    let authentication = authenticationGeneration
     var params = query
     if signed {
       if wbiKey == nil { _ = try await nav() }
@@ -188,6 +193,8 @@ final class Vault {
         separator: "; "),
       forHTTPHeaderField: "Cookie")
     let (data, response) = try await session.data(for: req)
+    try Task.checkCancellation()
+    guard authentication == authenticationGeneration else { throw CancellationError() }
     guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
       let code = (response as? HTTPURLResponse)?.statusCode ?? 0
       #if DEBUG
@@ -297,11 +304,11 @@ final class Vault {
     let data = try await pending.value
     guard generation == authenticationGeneration else { throw CancellationError() }
     if let wbi = data["wbi_img"] as? [String: String], let a = wbi["img_url"],
-      let b = wbi["sub_url"]
+      let b = wbi["sub_url"], let imageURL = URL(string: a), let subURL = URL(string: b)
     {
       wbiKey = Self.mixin(
-        URL(string: a)!.deletingPathExtension().lastPathComponent
-          + URL(string: b)!.deletingPathExtension().lastPathComponent)
+        imageURL.deletingPathExtension().lastPathComponent
+          + subURL.deletingPathExtension().lastPathComponent)
     }
     guard data["isLogin"] as? Bool == true else { return nil }
     return Account(

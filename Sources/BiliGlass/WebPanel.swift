@@ -228,7 +228,7 @@ struct WebFunctionsPage: View {
           Link("直播", destination: URL(string: "https://live.bilibili.com/")!)
           Text("这些服务在默认浏览器中打开。").font(.caption).foregroundStyle(.secondary)
         }.padding(22).frame(maxWidth: .infinity, alignment: .leading).floatingGlass(24)
-      }.padding(6).padding(.vertical, 8)
+      }.padding(AppLayout.pageInset).padding(.vertical, 8)
     }
   }
 }

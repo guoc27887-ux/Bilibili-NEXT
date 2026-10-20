@@ -9,7 +9,7 @@ struct RootView: View {
     ZStack {
       if !store.fullscreen.isPresented { GlassBackdrop() }
       HStack(alignment: .top, spacing: 20) {
-        GlassEffectContainer(spacing: 18) { sidebar }.frame(width: 210)
+        GlassEffectContainer(spacing: 20) { sidebar }.frame(width: AppLayout.sidebarWidth)
         VStack(spacing: 16) {
           GlassEffectContainer { topbar }
           content.frame(maxWidth: .infinity, maxHeight: .infinity).clipShape(
@@ -24,6 +24,7 @@ struct RootView: View {
       }
     }
     .tint(biliPink).appAppearance().frame(minWidth: 1020, maxWidth: .infinity, minHeight: 700, maxHeight: .infinity)
+    .background { InitialWindowFocus().frame(width: 0, height: 0) }
     .containerBackground(.black, for: .window)
     .sheet(item: $store.imageGallery) { ImageGallery(target: $0) }
     .sheet(item: $store.webTarget) { target in
@@ -93,20 +94,23 @@ struct RootView: View {
     }
     .onChange(of: store.searchFocus) { searchFocused = true }
     .onChange(of: store.playerFocus) { searchFocused = false; store.playback.focusPlayer() }
+    .onChange(of: store.navigationRevision) {
+      if !store.showPlayer { searchFocused = false; NSApp.keyWindow?.makeFirstResponder(nil) }
+    }
   }
   private var sidebar: some View {
-    VStack(spacing: 18) {
+    VStack(spacing: 20) {
       HStack(spacing: 10) {
         Image(systemName: "play.rectangle.fill").font(.title2).foregroundStyle(biliPink)
         Text("Bilibili NEXT").font(.title3.weight(.semibold))
         Spacer(minLength: 0)
         SettingsLink { Image(systemName: "slider.horizontal.3") }.buttonStyle(.plain).help("设置")
-      }.padding(18).floatingGlass(24)
+      }.padding(.horizontal, 18).frame(height: AppLayout.toolbarHeight).floatingGlass(AppLayout.panelRadius)
       ScrollView {
-        VStack(spacing: 18) {
+        VStack(spacing: 20) {
           navigationGroup("浏览", items: [.recommend, .popular, .dynamic, .messages])
           navigationGroup("资料库", items: [.history, .favorites, .later, .downloads, .profile, .web])
-        }.padding(3)
+        }.padding(.vertical, 2)
       }.scrollIndicators(.hidden).clipped()
       accountButton
     }
@@ -158,6 +162,7 @@ struct RootView: View {
         Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
         TextField("搜索视频或粘贴 BV 号", text: $store.query).focused($searchFocused).textFieldStyle(.plain)
           .onSubmit { store.search() }
+          .onExitCommand { searchFocused = false; NSApp.keyWindow?.makeFirstResponder(nil) }
         if !store.query.isEmpty {
           Button {
             store.clearSearch()
@@ -165,8 +170,7 @@ struct RootView: View {
             Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
           }.buttonStyle(.plain).help("清除搜索")
         }
-      }.padding(.horizontal, 15).frame(maxWidth: 520).frame(height: 42).glassEffect(
-        .clear, in: .capsule)
+      }.padding(.horizontal, 15).frame(maxWidth: 520).frame(height: 44).appGlass(22)
       Spacer(minLength: 0)
       SettingsLink { Image(systemName: "gearshape") }.help("设置")
       Button {
@@ -174,7 +178,7 @@ struct RootView: View {
       } label: {
         Image(systemName: "arrow.clockwise")
       }.help("刷新")
-    }.buttonStyle(.glass).padding(12).floatingGlass(24)
+    }.buttonStyle(.glass).padding(.horizontal, 12).frame(height: AppLayout.toolbarHeight).floatingGlass(AppLayout.panelRadius)
   }
   @ViewBuilder private var content: some View {
     if store.showPlayer {
@@ -193,7 +197,7 @@ struct RootView: View {
             Button("登录") { store.login() }
           }
         }
-      case .history: history
+      case .history: HistoryPage(store: store)
       case .downloads: DownloadPage(store: store)
       case .messages: NativeInboxPage(store: store)
       case .web: WebFunctionsPage(store: store)
@@ -270,29 +274,8 @@ struct RootView: View {
         if !store.videos.isEmpty {
           LoadMoreFooter(loading: store.busy, hasMore: store.hasMore, error: store.error, count: store.videos.count) { store.more() }
         }
-      }.padding(4).padding(.vertical, 12)
+      }.padding(AppLayout.pageInset).padding(.vertical, 8)
     }.overlay { if store.busy && store.videos.isEmpty { ProgressView("正在加载") } }
-  }
-  private var history: some View {
-    ScrollView {
-      VStack(alignment: .leading, spacing: 24) {
-        HStack {
-          Text("观看记录").font(.system(size: 28, weight: .bold))
-          Spacer()
-          if !store.history.isEmpty {
-            Button("清空") {
-              store.history = []
-              store.persistHistory()
-            }.buttonStyle(.bordered)
-          }
-        }
-        if store.history.isEmpty {
-          ContentUnavailableView("还没有观看记录", systemImage: "clock", description: Text("播放进度会保存在本机"))
-        } else {
-          videoGrid(store.history.map(\.video))
-        }
-      }.padding(6)
-    }
   }
   private func videoGrid(_ videos: [Video]) -> some View {
     GlassEffectContainer(spacing: 0) {
@@ -321,6 +304,7 @@ struct RootView: View {
 }
 struct VideoCard: View {
   let video: Video
+  var showsViews = true
   var body: some View {
     VStack(alignment: .leading, spacing: 10) {
       Thumbnail(url: video.cover, mode: .fill).aspectRatio(16 / 9, contentMode: .fit).clipShape(
@@ -337,10 +321,12 @@ struct VideoCard: View {
       HStack(spacing: 6) {
         Text(video.author).lineLimit(1)
         Spacer(minLength: 2)
-        Image(systemName: "play").font(.system(size: 9))
-        Text(
+        if showsViews {
+          Image(systemName: "play").font(.system(size: 9))
+          Text(
           video.views >= 10000
             ? String(format: "%.1f万", Double(video.views) / 10000) : "\(video.views)")
+        }
       }.font(.caption).foregroundStyle(.secondary)
     }.padding(12).floatingGlass(22).contentShape(RoundedRectangle(cornerRadius: 22)).cardHover()
   }

@@ -273,7 +273,7 @@ struct VideoShareSheet: View {
           Button("使用当前播放位置") { captureTime() }.font(.callout)
         }.frame(maxWidth: .infinity, alignment: .leading)
       }.padding(18).floatingGlass(22)
-      Text(url.absoluteString).font(.callout).textSelection(.enabled).padding(14).frame(maxWidth: .infinity, alignment: .leading).glassEffect(.clear, in: .rect(cornerRadius: 14))
+      Text(url.absoluteString).font(.callout).textSelection(.enabled).padding(14).frame(maxWidth: .infinity, alignment: .leading).appGlass(14)
       HStack {
         Button("复制 BV 号") { copy(detail.video.bvid, notice: "BV 号已复制") }
         Button("复制链接") { copy(url.absoluteString, notice: "链接已复制") }

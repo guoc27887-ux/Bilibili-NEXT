@@ -10,11 +10,13 @@ struct Reply: Identifiable {
   let date: Date
   let location: String
   var likes: Int
-  let count: Int
+  var count: Int
   let root: Int
   var liked: Bool
   var children: [Reply]
   let pictures: [String]
+  let textContent: CommentTextContent
+  let videoLinks: [CommentVideoLink]
   static func deduplicated(_ replies: [Reply], excluding: Set<Int> = []) -> [Reply] {
     var ids = excluding
     return replies.filter { ids.insert($0.id).inserted }
@@ -35,7 +37,11 @@ struct Reply: Identifiable {
       children: deduplicated((j["replies"] as? [[String: Any]] ?? []).compactMap(Reply.parse)),
       pictures: (content["pictures"] as? [[String: Any]] ?? []).compactMap {
         $0["img_src"] as? String
-      })
+      },
+      textContent: CommentTextContent(message: content["message"] as? String ?? "",
+        emotes: CommentEmote.parse(content["emote"])),
+      videoLinks: CommentVideoLink.parse(message: content["message"] as? String ?? "",
+        jumps: content["jump_url"]))
   }
 }
 struct Profile {
@@ -205,6 +211,8 @@ extension API {
   var replyingTo: Reply?
   var sending = false
   var sendError: String?
+  var submittedText: String?
+  var submissionStatus: String?
   var expanded: [Int: [Reply]] = [:]
   var childPages: [Int: Int] = [:]
   var childLoading: Set<Int> = []
@@ -215,24 +223,31 @@ extension API {
   private var liking: Set<Int> = []
   private var identity = UUID()
   private var task: Task<Void, Never>?
+  private var resourceID: Int?
+  private var listIdentity = UUID()
+  func loadIfNeeded(aid: Int, type: Int = 1, api: API) {
+    guard resourceID != aid || resourceType != type else { return }
+    load(aid: aid, type: type, api: api)
+  }
   func load(aid: Int, type: Int = 1, api: API, more: Bool = false) {
+    if resourceID != aid || resourceType != type {
+      stop()
+      resourceID = aid
+      resourceType = type
+    }
     if more && (loading || !hasMore) { return }
     if !more {
-      resourceType = type
       task?.cancel()
-      identity = UUID()
-      items = []
+      listIdentity = UUID()
       page = 1
-      expanded = [:]
-      childPages = [:]
       childLoading = []
       childErrors = [:]
-      childHasMore = [:]
       nextOffset = nil
       liking = []
       hasMore = true
     }
     let token = identity
+    let listToken = listIdentity
     let next = more ? page + 1 : 1
     let order = sort
     let kind = resourceType
@@ -248,11 +263,11 @@ extension API {
             "pagination_str": try CommentPage.pagination(offset), "web_location": "1315875",
           ], signed: true)
         try Task.checkCancellation()
-        guard token == identity else { return }
+        guard token == identity, listToken == listIdentity else { return }
         let result = try CommentPage.parse(d, first: !more)
         paginationDiagnostics = ["repeatedCursor": String(result.nextOffset == offset),
           "receivedReplies": String(result.replies.count), "page": String(next)]
-        let ids = Set(items.map(\.id))
+        let ids = more ? Set(items.map(\.id)) : []
         let additions = Reply.deduplicated(result.replies, excluding: ids)
         // Account-specific cursors can remain identical across distinct pages.
         // Detect repeated content, not repeated opaque tokens.
@@ -260,13 +275,18 @@ extension API {
           throw BiliError(text: "本页没有返回新的评论，请重试或切换排序")
         }
         count = result.count
-        items += additions
+        items = more ? items + additions : additions
+        if !more {
+          expanded = [:]
+          childPages = [:]
+          childHasMore = [:]
+        }
         page = next
         nextOffset = result.nextOffset
         hasMore = result.nextOffset != nil
         loading = false
       } catch {
-        guard token == identity, !Task.isCancelled else { return }
+        guard token == identity, listToken == listIdentity, !Task.isCancelled else { return }
         loading = false
         self.error = error.localizedDescription
       }
@@ -276,7 +296,8 @@ extension API {
     guard childHasMore[reply.id] != false else { return }
     guard childLoading.insert(reply.id).inserted else { return }
     let token = identity
-    defer { if token == identity { childLoading.remove(reply.id) } }
+    let listToken = listIdentity
+    defer { if token == identity && listToken == listIdentity { childLoading.remove(reply.id) } }
     let page = (childPages[reply.id] ?? 0) + 1
     childErrors[reply.id] = nil
     do {
@@ -286,7 +307,7 @@ extension API {
           "type": String(resourceType), "oid": "\(aid)", "root": "\(reply.id)", "pn": "\(page)",
           "ps": "10",
         ])
-      guard token == identity else { return }
+      guard token == identity, listToken == listIdentity else { return }
       let replies = (d["replies"] as? [[String: Any]] ?? []).compactMap(Reply.parse)
       let old = expanded[reply.id] ?? reply.children
       let ids = Set(old.map(\.id))
@@ -295,7 +316,9 @@ extension API {
       let total = (d["page"] as? [String: Any])?["count"] as? Int ?? reply.count
       childHasMore[reply.id] = !replies.isEmpty && page * 10 < total
     } catch {
-      if token == identity && !Task.isCancelled { childErrors[reply.id] = error.localizedDescription }
+      if token == identity && listToken == listIdentity && !Task.isCancelled {
+        childErrors[reply.id] = error.localizedDescription
+      }
     }
   }
   func collapse(_ reply: Reply) {
@@ -310,7 +333,9 @@ extension API {
     let target = replyingTo
     sending = true
     sendError = nil
-    defer { sending = false }
+    submittedText = nil
+    submissionStatus = nil
+    defer { if token == identity { sending = false } }
     do {
       var body = ["type": String(resourceType), "oid": "\(aid)", "message": text, "plat": "1"]
       if let target {
@@ -321,14 +346,24 @@ extension API {
       guard token == identity else { return }
       draft = ""
       replyingTo = nil
+      submittedText = text
+      let toast = result["success_toast"] as? String ?? ""
+      submissionStatus = toast.isEmpty ? "服务器已接收" : toast
       if let raw = result["reply"] as? [String: Any], let reply = Reply.parse(raw) {
         if let target {
           let root = target.root == 0 ? target.id : target.root
-          expanded[root, default: []].insert(reply, at: 0)
+          let existing = expanded[root] ?? items.first(where: { $0.id == root })?.children ?? []
+          expanded[root] = Reply.deduplicated(existing + [reply])
+          if let index = items.firstIndex(where: { $0.id == root }) {
+            items[index].count = max(items[index].count + 1, expanded[root]?.count ?? 0)
+            items[index].children = Reply.deduplicated(items[index].children + [reply])
+          }
         } else {
-          items.insert(reply, at: 0)
+          items = Reply.deduplicated([reply] + items)
           count += 1
         }
+      } else {
+        submissionStatus = (toast.isEmpty ? "服务器已接收" : toast) + "，尚未返回评论内容，请稍后刷新确认"
       }
     } catch {
       guard token == identity else { return }
@@ -370,6 +405,8 @@ extension API {
   func stop() {
     task?.cancel()
     identity = UUID()
+    listIdentity = UUID()
+    resourceID = nil
     items = []
     expanded = [:]
     childPages = [:]
@@ -379,7 +416,13 @@ extension API {
     replyingTo = nil
     error = nil
     sendError = nil
+    submittedText = nil
+    submissionStatus = nil
     loading = false
+    sending = false
+    count = 0
+    page = 1
+    hasMore = true
     childErrors = [:]
     childHasMore = [:]
     nextOffset = nil

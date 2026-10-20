@@ -106,7 +106,7 @@ struct FullscreenPlayerContent: View {
         .animation(reduceMotion ? nil : .easeInOut(duration:0.18),value:visible)
       PlaybackDetailsOverlay(playback: store.playback, topInset: 92, bottomInset: 100)
       Button("") { close() }.keyboardShortcut(.cancelAction).hidden()
-    }.preferredColorScheme(.dark).tint(biliPink)
+    }.environment(\.colorScheme, .dark).tint(biliPink)
       .simultaneousGesture(TapGesture().onEnded { wake() })
       .onContinuousHover { phase in if case .active = phase { wake() } }
       .task {

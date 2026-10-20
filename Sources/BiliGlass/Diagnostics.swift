@@ -18,13 +18,43 @@ import Synchronization
     }
   }
   static func state(store: Store, output: URL) async {
+    // Opt-in diagnostics only: observe actual decoded frames as well as the media clock.
+    // Normal launches never create this output or poll pixel buffers.
+    let frameOutput = AVPlayerItemVideoOutput(pixelBufferAttributes: nil)
+    var observedItem: AVPlayerItem?
+    var lastInput = ProcessInfo.processInfo.systemUptime
+    let inputMonitor = NSEvent.addLocalMonitorForEvents(matching: [
+      .keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel, .mouseMoved, .leftMouseDragged,
+    ]) { event in
+      lastInput = ProcessInfo.processInfo.systemUptime
+      return event
+    }
+    defer {
+      observedItem?.remove(frameOutput)
+      if let inputMonitor { NSEvent.removeMonitor(inputMonitor) }
+    }
     while !Task.isCancelled {
+      if store.playback.player.currentItem !== observedItem {
+        observedItem?.remove(frameOutput)
+        observedItem = store.playback.player.currentItem
+        observedItem?.add(frameOutput)
+      }
       let time = store.playback.player.currentTime().seconds
+      let itemTime = frameOutput.itemTime(forHostTime: CACurrentMediaTime())
+      var frameTime = CMTime.invalid
+      let newFrame = frameOutput.hasNewPixelBuffer(forItemTime: itemTime)
+      if newFrame { _ = frameOutput.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: &frameTime) }
       let state: [String: Any] = [
+        "appActive": NSApp.isActive,
+        "inputIdleSeconds": ProcessInfo.processInfo.systemUptime - lastInput,
+        "firstResponder": NSApp.keyWindow?.firstResponder.map { String(describing: type(of: $0)) } ?? "",
         "time": time.isFinite ? time : 0,
         "loading": store.playback.loading,
         "buffering": store.playback.buffering,
         "boosting": store.playback.isBoosting,
+        "temporarySpeed": store.playback.temporarySpeed,
+        "newDecodedFrame": newFrame,
+        "decodedFrameTime": frameTime.seconds.isFinite ? frameTime.seconds : -1,
         "showPlayer": store.showPlayer,
         "feed": ["count": store.videos.count, "page": store.page, "busy": store.busy,
                  "requestMS": store.feedMilliseconds, "error": store.error ?? ""] as [String: Any],

@@ -5,6 +5,7 @@ struct NativeInboxPage: View {
   @State private var tab = 0
   @State private var query = ""
   @State private var followingBottom = true
+  @State private var messagePosition = ScrollPosition(edge: .bottom)
   var body: some View {
     @Bindable var inbox = store.inbox
     VStack(spacing: 16) {
@@ -48,7 +49,7 @@ struct NativeInboxPage: View {
         } label: {
           Image(systemName: "arrow.clockwise")
         }.buttonStyle(.plain).help("刷新消息")
-      }.padding(13).glassEffect(.clear, in: .rect(cornerRadius: 14)).padding(.horizontal, 12)
+      }.padding(13).appGlass(14).padding(.horizontal, 12)
         .padding(.top, 12)
       if let error = inbox.error {
         Text(error).font(.caption).foregroundStyle(.secondary).padding(.horizontal, 14)
@@ -121,7 +122,7 @@ struct NativeInboxPage: View {
           }.buttonStyle(.glass).help("刷新会话")
         }.padding(16)
         Divider().padding(.horizontal, 16)
-        ScrollViewReader { reader in
+        Group {
           ScrollView {
             LazyVStack(spacing: 16) {
               if inbox.hasOlder {
@@ -134,7 +135,9 @@ struct NativeInboxPage: View {
               }
               Color.clear.frame(height: 1).id("bottom")
             }.padding(18)
-          }.defaultScrollAnchor(.bottom)
+          }.defaultScrollAnchor(.bottom, for: .initialOffset)
+            .defaultScrollAnchor(.bottom, for: .alignment)
+            .scrollPosition($messagePosition)
             .onScrollGeometryChange(for: Bool.self) { geometry in
               geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize
                 .height - 80
@@ -142,9 +145,9 @@ struct NativeInboxPage: View {
               followingBottom = value
             }
             .onChange(of: inbox.messages.last?.id) {
-              if followingBottom { reader.scrollTo("bottom", anchor: .bottom) }
+              if followingBottom { messagePosition.scrollTo(edge: .bottom) }
             }
-        }
+        }.id(selected.id)
         if let error = inbox.messageError {
           HStack {
             Text(error).font(.caption).foregroundStyle(.secondary)
@@ -163,8 +166,7 @@ struct NativeInboxPage: View {
               get: { inbox.drafts[selected.id] ?? "" }, set: { inbox.drafts[selected.id] = $0 }),
             axis: .vertical
           )
-          .lineLimit(2...6).textFieldStyle(.plain).padding(12).glassEffect(
-            .clear, in: .rect(cornerRadius: 16))
+          .lineLimit(2...6).textFieldStyle(.plain).padding(12).appGlass(16)
           Button(inbox.sending ? "发送中" : "发送") {
             if let account = store.account {
               Task { await inbox.send(api: store.api, account: account) }
@@ -204,6 +206,9 @@ struct NativeInboxPage: View {
               RoundedRectangle(cornerRadius: 10))
           }.buttonStyle(.plain).help("查看图片")
         }
+        if let share = message.share {
+          MessageShareCard(share: share, store: store)
+        } else {
         Text(message.text).textSelection(.enabled).foregroundStyle(
           message.retracted ? .secondary : .primary
         ).fixedSize(horizontal: false, vertical: true)
@@ -212,10 +217,10 @@ struct NativeInboxPage: View {
         } else if let link = message.link, message.image == nil {
           Link("查看详情", destination: link).font(.caption)
         }
+        }
         Text(message.date, format: .dateTime.month().day().hour().minute()).font(.caption2)
           .foregroundStyle(.secondary)
-      }.padding(14).glassEffect(
-        .regular.tint(own ? biliPink.opacity(0.12) : .clear), in: .rect(cornerRadius: 18))
+      }.padding(14).appGlass(18, tint: own ? biliPink.opacity(0.12) : .clear)
       if !own { Spacer(minLength: 50) }
     }
     }
@@ -300,7 +305,7 @@ struct NativeNotificationsPage: View {
         } else if rows.isEmpty && error == nil {
           ContentUnavailableView("暂无消息", systemImage: "bell").frame(maxWidth: .infinity)
         }
-      }.padding(5)
+      }.padding(AppLayout.pageInset)
     }.task(id: kind) { await load(reset: true) }
   }
   private func load(reset: Bool) async {

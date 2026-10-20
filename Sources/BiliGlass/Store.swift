@@ -50,6 +50,7 @@ private struct FeedSnapshot: Codable {
   let comments = Comments()
   let videoActions = VideoActionsModel()
   let inbox = InboxModel()
+  let accountHistory = AccountHistory()
   var danmaku = DanmakuController()
   var navigationRevision = 0
   var profileTarget: ProfileTarget?
@@ -106,6 +107,12 @@ private struct FeedSnapshot: Codable {
     restoring = false
   }
   func reload() {
+    if destination == .history && !showPlayer {
+      if UserDefaults.standard.string(forKey: "historySource") != "local" {
+        Task { await accountHistory.load(api: api, refresh: true) }
+      }
+      return
+    }
     guard !busy || loadingFeedKey != feedKey else { return }
     feedTask?.cancel()
     feedID = UUID()
@@ -122,7 +129,7 @@ private struct FeedSnapshot: Codable {
           try await (activeQuery.isEmpty ? feed(page: 1) : api.search(activeQuery, page: 1))
         try Task.checkCancellation()
         guard token == feedID else { return }
-        videos = items
+        videos = Video.deduplicated(items)
         hasMore =
           destination == .dynamic
           ? api.dynamicHasMore : destination != .later && !items.isEmpty
@@ -146,6 +153,10 @@ private struct FeedSnapshot: Codable {
       return
     }
     videoActions.clear()
+    comments.stop()
+    danmaku.stop()
+    navigationRevision += 1
+    profileTarget = nil
     destination = .popular
     showPlayer = false
     playback.stop()
@@ -160,6 +171,8 @@ private struct FeedSnapshot: Codable {
     reload()
   }
   func openSaved(_ entry: SavedDownload) {
+    navigationRevision += 1
+    profileTarget = nil
     videoActions.clear(); comments.stop(); danmaku.stop()
     showPlayer = true
     playerFocus += 1
@@ -189,8 +202,7 @@ private struct FeedSnapshot: Codable {
         try Task.checkCancellation()
         guard token == feedID else { return }
         let ids = Set(videos.map(\.id))
-        var seen = ids
-        videos += items.filter { seen.insert($0.id).inserted }
+        videos += Video.deduplicated(items, excluding: ids)
         page = next
         hasMore =
           destination == .dynamic
@@ -220,6 +232,14 @@ private struct FeedSnapshot: Codable {
     playerFocus += 1
     playback.focusPlayer()
     playback.open(bvid, api: api) { [weak self] cid in self?.position(bvid, cid: cid) ?? 0 }
+  }
+  func openHistory(_ entry: AccountHistoryEntry) {
+    videoActions.clear(); navigationRevision += 1; profileTarget = nil
+    comments.stop(); danmaku.stop(); showPlayer = true; playerFocus += 1
+    playback.focusPlayer()
+    playback.open(entry.video.bvid, api: api, initialCID: entry.cid) { cid in
+      cid == entry.cid ? Double(max(0, entry.progress)) : 0
+    }
   }
   func position(_ bvid: String, cid: Int) -> Double {
     history.first { $0.video.bvid == bvid }?.positions["\(cid)"] ?? 0
@@ -359,6 +379,7 @@ private struct FeedSnapshot: Codable {
     UserDefaults.standard.removeObject(forKey: "homeFeedSnapshot")
     videoActions.clear()
     inbox.clear()
+    accountHistory.reset()
     playback.stop()
     showPlayer = false
     navigationRevision += 1

@@ -238,6 +238,7 @@ enum ParallelMediaDownload {
     previous?.cancel()
     job.task = Task {
       await previous?.value
+      guard !Task.isCancelled, jobs.contains(where: { $0 === job }), !job.finished else { return }
       job.cancelled = false
       job.error = nil
       job.status = "排队中"
@@ -260,6 +261,8 @@ enum ParallelMediaDownload {
     let token = UUID()
     job.runID = token
     do {
+      try Task.checkCancellation()
+      guard jobs.contains(where: { $0 === job }), !job.cancelled, !job.finished else { return }
       let limit = max(
         1, min(3, UserDefaults.standard.object(forKey: "simultaneousDownloads") as? Int ?? 1))
       while jobs.filter({
@@ -273,6 +276,7 @@ enum ParallelMediaDownload {
       job.status = "获取清晰度"
       persist()
       let streams = try await api.streams(bvid: job.video.bvid, cid: job.cid)
+      try Task.checkCancellation()
       guard let video = API.bestVideo(streams.videos, quality: job.qn) else {
         throw BiliError(text: "此清晰度已不可用")
       }
@@ -284,7 +288,7 @@ enum ParallelMediaDownload {
         video, directory: temp.appendingPathComponent("video"), threads: threads
       ) { p in
         Task { @MainActor in
-          guard job.runID == token else { return }
+          guard job.runID == token, !job.cancelled, !job.finished, job.error == nil else { return }
           job.progress = p * 0.8
           if Date().timeIntervalSince(self.lastSave) > 1 { self.persist() }
         }
@@ -296,7 +300,7 @@ enum ParallelMediaDownload {
         streams.audio, directory: temp.appendingPathComponent("audio"), threads: threads
       ) { p in
         Task { @MainActor in
-          guard job.runID == token else { return }
+          guard job.runID == token, !job.cancelled, !job.finished, job.error == nil else { return }
           job.progress = 0.8 + p * 0.15
         }
       }

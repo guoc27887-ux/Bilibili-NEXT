@@ -14,7 +14,8 @@ actor ThumbnailCache {
   init() {
     cache = URLCache(
       memoryCapacity: 16 * 1024 * 1024, diskCapacity: 128 * 1024 * 1024,
-      diskPath: "local.BiliGlass.thumbnails")
+      directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
+        .appendingPathComponent("BiliGlass/Thumbnails", isDirectory: true))
     let c = URLSessionConfiguration.default
     c.urlCache = cache
     c.httpCookieStorage = nil
@@ -29,10 +30,12 @@ actor ThumbnailCache {
         || host.hasSuffix(".biliimg.com")
     else { throw BiliError(text: "封面地址无效") }
     if let data = memory[url] { return data }
+    let token = generation
     var request = URLRequest(url: url)
     API.mediaHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
     let (data, response) = try await session.data(for: request)
     try Task.checkCancellation()
+    guard token == generation else { throw CancellationError() }
     guard (response as? HTTPURLResponse)?.statusCode == 200,
       response.mimeType?.hasPrefix("image/") == true, data.count < 64 * 1024 * 1024
     else { throw BiliError(text: "封面不可用") }

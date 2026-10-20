@@ -13,8 +13,11 @@ References consulted, no code copied:
 - IINA+ DASH representation model: https://github.com/xjbeta/iina-plus
 - Video interactions and favorite-folder API reference: https://github.com/bilibili-plugins/bilibili-api-collect/blob/master/docs/video/action.md and https://github.com/bilibili-plugins/bilibili-api-collect/blob/master/docs/fav/info.md
 - bilibili-API-collect API documentation: https://github.com/pskdje/bilibili-API-collect
+- Private-message share schemas, comment submission responses and emote metadata: https://github.com/pskdje/bilibili-API-collect/blob/main/docs/message/private_msg_content.md , https://github.com/bilibili-plugins/bilibili-api-collect/blob/master/docs/comment/action.md and https://github.com/bilibili-plugins/bilibili-api-collect/blob/master/docs/comment/list.md — independent Swift parsing and native views; no implementation or sample account data bundled.
 - Official BAS language specification (independent Swift parser and native renderer; no JavaScript runtime or implementation copied): https://bilibili.github.io/bas/ and https://github.com/bilibili/bas
 - DanmakuFlameMaster mode 7 data format reference (no implementation copied): https://github.com/bilibili/DanmakuFlameMaster
 - Apple Liquid Glass: https://developer.apple.com/documentation/SwiftUI/Applying-Liquid-Glass-to-custom-views
+- Account video-history cursor schema: https://github.com/bilibili-plugins/bilibili-api-collect/blob/master/docs/historytoview/history.md — independently implemented native paging, source selection and playback resume.
+- AVPlayer fast-forward behavior and I-frame fallback: https://developer.apple.com/library/archive/qa/qa1772/_index.html
 
 This is an unofficial client. Bilibili names, videos, thumbnails and account data belong to their respective owners.

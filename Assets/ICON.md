@@ -1,7 +1,9 @@
 # Bilibili NEXT icon
 
-Generated with the built-in imagegen tool. Master: `Bilibili-NEXT-icon.png` (transparent exterior); exported to the standard macOS 16–1024 px icon set and `Scripts/AppIcon.icns`.
+Generated and refined with the built-in imagegen tool. Master: `Bilibili-NEXT-icon.png` (transparent exterior); exported with Core Graphics to the standard macOS 16–1024 px icon set and `Scripts/AppIcon.icns`.
 
-Prompt:
+Refinement prompt (1.0.1):
 
-Use case: logo-brand. Asset type: production macOS application icon for Bilibili NEXT, a native video player with Liquid Glass UI. Create one square icon, front-facing and perfectly centered. A refined warm pink rounded-square glass tile, softly rounded continuous corners, with a prominent small frosted-white television shape and a pink right-facing play triangle inset in the screen. Two short neat antenna strokes. Original minimalist media symbol, friendly but professional. Subtle glass depth, clean bright rim highlights, soft internal reflections, polished macOS system-icon feel. Strong silhouette readable at 32 pixels, ample consistent margins. No letters, no wordmark, no watermark, no surrounding desktop or mockup. Transparent exterior around the single rounded-square icon. Square 1024x1024.
+Refine this macOS Bilibili NEXT app icon. Preserve the recognizable pink rounded-square, white TV with two antennae, and pink play triangle. Crucial repair: exterior must be perfectly clean actual transparency with no red speckles, no colored halo, no ghost pixels anywhere outside the smooth rounded square. Reduce the inflated toy-like bevels: use a thinner white TV outline, a crisp simple play triangle and restrained frosted-glass relief. Keep the symbol symmetric and balanced, visibly center it vertically with antennae included. One soft upper-left highlight, soft rose pink gradient, no thick concentric frames. Clean native macOS Liquid Glass quality, excellent small-icon legibility. Centered tile occupies 82% of a square canvas. No text or watermark. Output square PNG with true transparent exterior.
+
+The 1.0.0 icon is retained in the Git history. The final icon is an independent client symbol; it does not imply official Bilibili endorsement.

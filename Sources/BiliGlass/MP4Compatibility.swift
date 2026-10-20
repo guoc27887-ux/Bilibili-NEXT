@@ -40,7 +40,7 @@ enum MP4Compatibility {
     try file.synchronize()
   }
   static func playbackURL(_ original: URL) async throws -> URL {
-    try await Task.detached(priority: .userInitiated) {
+    try await downloadIO {
       try Task.checkCancellation()
       guard !(try patchOffsets(original)).isEmpty else { return original }
       let attributes = try FileManager.default.attributesOfItem(atPath: original.path)
@@ -66,6 +66,6 @@ enum MP4Compatibility {
       }
       for file in old.dropFirst(1) { try? FileManager.default.removeItem(at: file) }
       return destination
-    }.value
+    }
   }
 }

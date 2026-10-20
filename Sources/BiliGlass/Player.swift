@@ -38,7 +38,7 @@ import SwiftUI
   var temporarySpeed: Float = 3
   var showsDetails = false
   var isFullscreen = false
-  var boostLabel: String { "\(Double(temporarySpeed).formatted())× 临时倍速" + (temporarySpeed < 3 ? " · 当前播放源上限" : "") }
+  var boostLabel: String { "\(Double(temporarySpeed).formatted())× 临时倍速" + (isOffline ? "" : " · 在线播放") }
   var isOffline = false
   var persistQualityPreference = true
   var connectionOverride: Int?
@@ -111,7 +111,7 @@ import SwiftUI
     let endMargin = min(10, Double(duration) * 0.1)
     return saved >= Double(duration) - endMargin ? 0 : saved
   }
-  func open(_ bvid: String, api: API, quality: Int? = nil, resume: @escaping (Int) -> Double) {
+  func open(_ bvid: String, api: API, quality: Int? = nil, initialCID: Int? = nil, resume: @escaping (Int) -> Double) {
     stop()
     automaticRecoveries = 0
     let token = generation
@@ -128,7 +128,7 @@ import SwiftUI
         try Task.checkCancellation()
         guard token == generation else { return }
         detail = d
-        guard let page = d.pages.first else { throw BiliError(text: "没有可用分集") }
+        guard let page = d.pages.first(where: { $0.id == initialCID }) ?? d.pages.first else { throw BiliError(text: "没有可用分集") }
         selectedCID = page.id
         try await load(
           api: api, bvid: bvid, cid: page.id, quality: quality,
@@ -528,11 +528,14 @@ import SwiftUI
     guard now.isFinite, duration.isFinite, duration > 0 else { return }
     player.seek(to: CMTime(seconds: min(duration, max(0, now + offset)), preferredTimescale: 600))
   }
-  nonisolated static func temporaryRate(canPlayFastForward: Bool) -> Float { canPlayFastForward ? 3 : 2 }
+  nonisolated static func temporaryRate(isOffline: Bool, canPlayFastForward: Bool) -> Float {
+    // HLS may report fast-forward support but enter I-frame-only trick play above 2×.
+    // Only complete local media uses 3×; a fully read-ahead HLS session is still HLS.
+    isOffline && canPlayFastForward ? 3 : 2
+  }
   func beginTemporarySpeed() -> Bool {
     guard !loading, !buffering, player.timeControlStatus == .playing, let item = player.currentItem else { return false }
-    // HLS without a fast-forward rendition may only support continuous audio/video up to 2×.
-    temporarySpeed = Self.temporaryRate(canPlayFastForward: item.canPlayFastForward)
+    temporarySpeed = Self.temporaryRate(isOffline: isOffline, canPlayFastForward: item.canPlayFastForward)
     isBoosting = true
     player.rate = temporarySpeed
     return true

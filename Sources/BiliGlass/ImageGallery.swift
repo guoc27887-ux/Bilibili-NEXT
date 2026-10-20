@@ -72,6 +72,7 @@ struct ImageGallery: View {
   }
   private func save() {
     guard let data = original else { return }
+    let savedAddress = address
     let panel = NSSavePanel()
     let source = CGImageSourceCreateWithData(data as CFData,nil)
     let type = source.flatMap { CGImageSourceGetType($0) }.flatMap { UTType($0 as String) }
@@ -81,8 +82,10 @@ struct ImageGallery: View {
     panel.begin { response in
       guard response == .OK, let url = panel.url else { return }
       Task {
-        do { try await Task.detached { try data.write(to:url,options:.atomic) }.value; saved = true }
-        catch { self.error = error.localizedDescription }
+        do {
+          try await Task.detached { try data.write(to:url,options:.atomic) }.value
+          if address == savedAddress { saved = true }
+        } catch { if address == savedAddress { self.error = error.localizedDescription } }
       }
     }
   }

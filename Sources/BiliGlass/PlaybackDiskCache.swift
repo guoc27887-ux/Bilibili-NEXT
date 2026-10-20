@@ -39,8 +39,13 @@ actor PlaybackDiskCache: HTTPRangeStreaming {
     prefetchConnections = max(1, min(4, connections / 2))
     directory = root.appendingPathComponent("\(getpid())-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    lease = Darwin.open(directory.appendingPathComponent(".lease").path, O_CREAT | O_RDWR, 0o600)
-    guard lease >= 0, flock(lease, LOCK_EX | LOCK_NB) == 0 else { throw CocoaError(.fileWriteUnknown) }
+    let descriptor = Darwin.open(directory.appendingPathComponent(".lease").path, O_CREAT | O_RDWR, 0o600)
+    guard descriptor >= 0, flock(descriptor, LOCK_EX | LOCK_NB) == 0 else {
+      if descriptor >= 0 { Darwin.close(descriptor) }
+      try? FileManager.default.removeItem(at: directory)
+      throw CocoaError(.fileWriteUnknown)
+    }
+    lease = descriptor
   }
   deinit { Darwin.close(lease) }
 

@@ -103,10 +103,16 @@ struct ProtoReader {
     stop()
     self.cid = cid
     let current = token
-    if let localSidecar, let data = try? Data(contentsOf: localSidecar),
-      let saved = try? JSONDecoder().decode([Danmaku].self, from: data)
-    {
-      items = saved
+    if let localSidecar {
+      task = Task {
+        let saved = await Task.detached(priority: .userInitiated) {
+          guard let data = try? Data(contentsOf: localSidecar) else { return Optional<[Danmaku]>.none }
+          return try? JSONDecoder().decode([Danmaku].self, from: data)
+        }.value
+        guard token == current, !Task.isCancelled else { return }
+        if let saved { items = Self.merged(saved) }
+        else { start(cid: cid, aid: aid, api: api, player: player) }
+      }
       return
     }
     guard cid > 0 else { return }
@@ -177,6 +183,8 @@ struct ProtoReader {
     task = nil
     specialTask = nil
     token = UUID()
+    cid = 0
+    sending = false
     localSent = []
     needsRebuild = false
     segments = [:]
@@ -198,7 +206,7 @@ struct ProtoReader {
     guard time.isFinite else { return }
     sending = true
     sendError = nil
-    defer { sending = false }
+    defer { if token == current { sending = false } }
     do {
       let d = try await api.post(
         "/x/v2/dm/post",

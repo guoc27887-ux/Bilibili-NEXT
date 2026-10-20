@@ -58,13 +58,13 @@ struct PreferencesView: View {
                     .font(.body.weight(tab == index ? .semibold : .regular))
                     .frame(maxWidth: .infinity, alignment: .leading).padding(12)
                 }.buttonStyle(.plain)
-                  .glassEffect(tab == index ? .regular.tint(biliPink.opacity(0.2)) : .clear, in: .rect(cornerRadius: 14))
+                  .appGlass(14, tint: tab == index ? biliPink.opacity(0.2) : .clear, interactive: true)
               }
             }
           }
           Spacer()
           Text("Bilibili NEXT").font(.caption.weight(.medium)).foregroundStyle(.secondary).padding(.horizontal, 10)
-        }.padding(14).frame(width: 180).frame(maxHeight: .infinity).floatingGlass(24)
+        }.padding(14).frame(width: 200).frame(maxHeight: .infinity).floatingGlass(AppLayout.panelRadius)
         VStack(alignment: .leading, spacing: 16) {
           Text(categories[tab].0).font(.title2.weight(.semibold)).padding(.horizontal, 6).padding(.top, 4)
           ScrollView {
@@ -77,12 +77,12 @@ struct PreferencesView: View {
                 case 3: cacheSettings
                 default: aboutSettings
                 }
-              }.padding(6).id(tab).transition(.opacity)
+              }.padding(AppLayout.pageInset).id(tab).transition(.opacity)
             }
           }.scrollIndicators(.hidden).clipShape(.rect(cornerRadius: 24))
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
       }.padding(24)
-    }.frame(width: 940, height: 700).appAppearance().tint(biliPink)
+    }.frame(minWidth: 940, idealWidth: 980, minHeight: 700, idealHeight: 740).appAppearance().tint(biliPink)
   }
   private func section<Content: View>(_ title: String, @ViewBuilder content: () -> Content)
     -> some View
@@ -183,7 +183,7 @@ struct PreferencesView: View {
     section("显示") {
       Text("这是一条弹幕").font(.system(size: 25 * scale, weight: .semibold))
         .foregroundStyle(.white.opacity(opacity)).shadow(color: .black.opacity(0.8), radius: 1, y: 1)
-        .frame(maxWidth: .infinity).frame(height: 70).glassEffect(.clear, in: .rect(cornerRadius: 16))
+        .frame(maxWidth: .infinity).frame(height: 70).appGlass(16)
       sliderRow("不透明度", value:$opacity, range:0.1...1, step:0.01, display:"\(Int(opacity*100))%")
       sliderRow("显示区域", value:$area, range:0.2...1, step:0.1, display:"\(Int(area*100))%")
       sliderRow("文字大小", value:$scale, range:0.5...2, step:0.1, display:"\(scale.formatted(.number.precision(.fractionLength(1))))×")
@@ -195,8 +195,8 @@ struct PreferencesView: View {
     HStack(spacing:14) {
       Text(title)
       Spacer(minLength:20)
-      Slider(value:value,in:range,step:step).labelsHidden().accessibilityLabel(title).frame(width:220)
-      Text(display).monospacedDigit().frame(width:52,alignment:.trailing)
+      Slider(value:value,in:range,step:step).labelsHidden().accessibilityLabel(title).frame(minWidth:140, idealWidth:220, maxWidth:260)
+      Text(display).monospacedDigit().frame(width:64,alignment:.trailing)
     }.accessibilityElement(children:.contain)
   }
   private func stepperRow(_ title: String, value: Binding<Int>, range: ClosedRange<Int>) -> some View {

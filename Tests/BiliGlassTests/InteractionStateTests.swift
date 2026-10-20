@@ -46,7 +46,9 @@ struct InteractionStateTests {
     #expect(downloads.jobs.count == 1)
   }
   @Test func unsupportedFastForwardNeverAdvertisesThreeTimes() {
-    #expect(Playback.temporaryRate(canPlayFastForward: false) == 2)
-    #expect(Playback.temporaryRate(canPlayFastForward: true) == 3)
+    #expect(Playback.temporaryRate(isOffline: false, canPlayFastForward: false) == 2)
+    #expect(Playback.temporaryRate(isOffline: false, canPlayFastForward: true) == 2)
+    #expect(Playback.temporaryRate(isOffline: true, canPlayFastForward: false) == 2)
+    #expect(Playback.temporaryRate(isOffline: true, canPlayFastForward: true) == 3)
   }
 }

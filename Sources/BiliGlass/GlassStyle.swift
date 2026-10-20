@@ -1,20 +1,33 @@
 import SwiftUI
 import ImageIO
 import UniformTypeIdentifiers
+import CoreImage
+
+enum AppLayout {
+  static let sidebarWidth: CGFloat = 224
+  static let toolbarHeight: CGFloat = 68
+  static let panelRadius: CGFloat = 24
+  static let pageInset: CGFloat = 8
+  static let pageTitle: Font = .system(size: 28, weight: .bold)
+}
 
 extension View {
-  func floatingGlass(_ radius: CGFloat = 22) -> some View { modifier(GlassSurface(radius: radius)) }
+  func floatingGlass(_ radius: CGFloat = 22) -> some View { appGlass(radius, tint: .primary.opacity(0.035)) }
+  func appGlass(_ radius: CGFloat = 14, tint: Color = .clear, interactive: Bool = false) -> some View {
+    modifier(GlassSurface(radius: radius, tint: tint, interactive: interactive))
+  }
   func appAppearance() -> some View { modifier(AppAppearance()) }
   func cardHover() -> some View { modifier(CardHover()) }
 }
 private struct GlassSurface: ViewModifier {
   let radius: CGFloat
+  let tint: Color
+  let interactive: Bool
   @AppStorage("glassStyle") private var style = "clear"
   @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
   func body(content: Content) -> some View {
     content.glassEffect((style == "clear" && !reduceTransparency ? Glass.clear : Glass.regular)
-      .tint(.primary.opacity(0.035)), in: .rect(cornerRadius: radius))
-      .shadow(color: .black.opacity(0.12), radius: 16, y: 6)
+      .tint(tint).interactive(interactive), in: .rect(cornerRadius: radius))
   }
 }
 private struct AppAppearance: ViewModifier {
@@ -51,20 +64,53 @@ struct GlassBackdrop: View {
         if let image, !path.isEmpty {
           Image(nsImage: image).resizable().scaledToFill()
             .frame(width: geometry.size.width, height: geometry.size.height).clipped()
-            .blur(radius: blur ? 22 : 0).opacity(opacity)
+            .opacity(opacity)
           (scheme == .dark ? Color.black : Color.white).opacity(scheme == .dark ? 0.18 : 0.25)
         }
       }.frame(width: geometry.size.width, height: geometry.size.height).clipped()
-    }.ignoresSafeArea().allowsHitTesting(false).task(id: path) {
-      image = nil
-      guard !path.isEmpty, let decoded = try? await BackgroundImages.shared.load(URL(fileURLWithPath: path)), !Task.isCancelled else { return }
-      image = NSImage(cgImage: decoded, size: .zero)
-    }
+      .task(id: BackgroundRequest(path: path, blur: blur, size: geometry.size)) {
+        let request = BackgroundRequest(path: path, blur: blur, size: geometry.size)
+        guard !path.isEmpty else { image = nil; return }
+        let decoded = try? await BackgroundImages.shared.render(request)
+        guard !Task.isCancelled else { return }
+        guard let decoded else { image = nil; return }
+        image = NSImage(cgImage: decoded, size: .zero)
+      }
+    }.ignoresSafeArea().allowsHitTesting(false)
+  }
+}
+/// Quantized layout avoids decoding/blur work for every pixel of a window resize.
+struct BackgroundRequest: Hashable, Sendable {
+  let path: String
+  let blur: Bool
+  let width: Int
+  let height: Int
+  init(path: String, blur: Bool, size: CGSize) {
+    self.path = path; self.blur = blur
+    width = max(128, Int(ceil(size.width / 128)) * 128)
+    height = max(128, Int(ceil(size.height / 128)) * 128)
   }
 }
 actor BackgroundImages {
   static let shared = BackgroundImages()
   private var cached: (URL, CGImage)?
+  private var rendered: (BackgroundRequest, CGImage)?
+  private let context = CIContext(options: [.useSoftwareRenderer: true, .cacheIntermediates: false])
+  func render(_ request: BackgroundRequest) throws -> CGImage {
+    try Task.checkCancellation()
+    if let rendered, rendered.0 == request { return rendered.1 }
+    let image = try load(URL(fileURLWithPath: request.path))
+    guard request.blur else { return image }
+    let scale = max(Double(request.width) / Double(image.width), Double(request.height) / Double(image.height))
+    let source = CIImage(cgImage: image)
+    let blurred = source.clampedToExtent()
+      .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 22 / scale])
+      .cropped(to: source.extent)
+    guard let output = context.createCGImage(blurred, from: source.extent) else { return image }
+    try Task.checkCancellation()
+    rendered = (request, output)
+    return output
+  }
   func load(_ url: URL) throws -> CGImage {
     if let cached, cached.0 == url { return cached.1 }
     guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
@@ -73,6 +119,7 @@ actor BackgroundImages {
         kCGImageSourceThumbnailMaxPixelSize: 3200, kCGImageSourceShouldCacheImmediately: true,
       ] as CFDictionary) else { throw BiliError(text: "无法读取这张背景图片") }
     cached = (url, image)
+    rendered = nil
     return image
   }
   func importImage(_ original: URL) throws -> URL {
