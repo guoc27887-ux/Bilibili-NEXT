@@ -98,7 +98,7 @@ final class CDNTransport: HTTPRangeStreaming, Sendable {
     try Task.checkCancellation()
     await prefixes.insert(prefix)
     let allCandidates = Array(representation.urlCandidates.prefix(3))
-    await routes.register(prefix, candidates: allCandidates)
+    await routes.register(prefix, candidates: allCandidates, kind: representation.kind.rawValue)
     for url in allCandidates { await transfers.register(url, kind: representation.kind.rawValue) }
     let duration = start.duration(to: .now).components
     let milliseconds = Int(duration.seconds * 1_000 + duration.attoseconds / 1_000_000_000_000_000)
@@ -113,7 +113,7 @@ final class CDNTransport: HTTPRangeStreaming, Sendable {
 
   func diagnostics() async -> [[String: String]] { await probes.items }
   func statistics() async -> [String: Int] { await transfers.snapshot() }
-  func activeHosts() async -> [String: String] { await transfers.hosts }
+  func activeHosts() async -> [String: String] { await routes.diagnostics() }
   private static func failureName(_ error: Error) -> String {
     guard let error = error as? HTTPRangeResponseError else {
       return error is CDNIdleTimeout ? "idleTimeout" : error is BiliError ? "probeTimeout" : "transport"
@@ -200,6 +200,7 @@ final class CDNTransport: HTTPRangeStreaming, Sendable {
             catch { await delivery.consumerFailed(); throw error }
           })
         guard await delivery.bytes == expectedRange.length else { throw HTTPRangeResponseError.rejectedBody }
+        await routes.recovered(url, from: candidates.first ?? url, to: candidate)
         return HTTPRangeStreamResult(byteCount: expectedRange.length)
       } catch {
         try Task.checkCancellation()
@@ -289,8 +290,9 @@ private actor CDNActivity {
     // URLSession can queue requests behind occupied connections before any response.
     // A short probe still has its own deadline, while normal media gets a first-response budget.
     guard !isConsuming else { return false }
-    if let bodyBudget, let bodyBegan, bodyBegan.duration(to: .now) - consumerTime >= bodyBudget { return true }
-    return last.duration(to: .now) >= (hasResponse ? duration : max(duration, .seconds(12)))
+    // A busy parallel transfer can take many seconds and still make progress.
+    // Restart the deadline on every chunk instead of timing the whole block.
+    return last.duration(to: .now) >= (hasResponse ? min(duration, bodyBudget ?? duration) : max(duration, .seconds(12)))
   }
 }
 private struct CDNPrefix: Sendable {
@@ -301,13 +303,19 @@ private struct CDNPrefix: Sendable {
 private struct CDNRoute: Sendable {
   let anchor: CDNPrefix
   let candidates: [URL]
+  let kind: String
 }
 private actor CDNVerifiedRoutes {
   private var items: [URL: CDNRoute] = [:]
+  private var preferred: [URL: URL] = [:]
+  private var activeAnchors: [String: URL] = [:]
+  private var switches: [URL: Int] = [:]
   private var verified: [URL: CDNPrefix] = [:]
   private var failures: [URL: [(HTTPByteRange, ContinuousClock.Instant)]] = [:]
-  func register(_ prefix: CDNPrefix, candidates: [URL]) {
-    items[prefix.url] = CDNRoute(anchor: prefix, candidates: candidates)
+  func register(_ prefix: CDNPrefix, candidates: [URL], kind: String) {
+    items[prefix.url] = CDNRoute(anchor: prefix, candidates: candidates, kind: kind)
+    activeAnchors[kind] = prefix.url
+    preferred[prefix.url] = prefix.url; switches[prefix.url] = 0
     verified[prefix.url] = prefix
   }
   func get(_ url: URL) -> CDNRoute? { items[url] }
@@ -318,13 +326,28 @@ private actor CDNVerifiedRoutes {
   }
   func ordered(_ url: URL, range: HTTPByteRange) -> [URL] {
     guard let route = items[url] else { return [url] }
-    let urls = [url] + route.candidates.filter { $0 != url }
+    let current = preferred[url] ?? url
+    let urls = [current] + ([url] + route.candidates).filter { $0 != current && $0 != url } + (current == url ? [] : [url])
     let blocked = urls.filter { candidate in
       (failures[candidate] ?? []).contains { r, until in
         until > .now && r.start <= range.endInclusive && range.start <= r.endInclusive
       }
     }
     return urls.filter { !blocked.contains($0) } + blocked
+  }
+  func recovered(_ anchor: URL, from failed: URL, to replacement: URL) {
+    // Ignore late successes from requests that began before a route switch.
+    guard preferred[anchor] == failed, failed != replacement else { return }
+    preferred[anchor] = replacement
+    switches[anchor, default: 0] += 1
+  }
+  func diagnostics() -> [String: String] {
+    var result: [String: String] = [:]
+    for (kind, anchor) in activeAnchors {
+      result[kind + "Host"] = (preferred[anchor] ?? anchor).host ?? ""
+      result[kind + "Switches"] = String(switches[anchor] ?? 0)
+    }
+    return result
   }
   func verify(_ url: URL, anchor: CDNPrefix,
               fetch: @Sendable () async throws -> CDNPrefix) async throws -> CDNPrefix {

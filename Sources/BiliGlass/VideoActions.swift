@@ -18,6 +18,12 @@ struct VideoRelation: Equatable, Sendable {
   var coins: Int
   var favorited: Bool
 }
+struct TripleResult: Sendable {
+  let like: Bool
+  let coin: Bool
+  let favorite: Bool
+  let count: Int
+}
 struct CoinAvailability {
   let limit: Int
   let coins: Int?
@@ -63,19 +69,12 @@ extension API {
   func videoRelation(_ aid: Int, bvid: String? = nil) async throws -> VideoRelation {
     var query = ["aid": String(aid)]
     if let bvid { query["bvid"] = bvid }
-    let requestQuery = query
-    @Sendable func read(_ path: String, title: String) async throws -> [String: Any] {
-      do { return try await request(path, requestQuery) }
-      catch is CancellationError { throw CancellationError() }
-      catch { throw BiliError(text: title + "读取失败：" + error.localizedDescription, code: (error as? BiliError)?.code) }
+    let data = try await request("/x/web-interface/archive/relation", query)
+    guard let liked = data["like"] as? Bool, let coins = data["coin"] as? Int,
+      let favorite = data["favorite"] as? Bool, coins >= 0 else {
+      throw BiliError(text: "互动状态返回不完整，请刷新")
     }
-    async let like = read("/x/web-interface/archive/has/like", title: "点赞状态")
-    async let coins = read("/x/web-interface/archive/coins", title: "已投币数量")
-    async let favorite = read("/x/v2/fav/video/favoured", title: "收藏状态")
-    let (l, c, f) = try await (like, coins, favorite)
-    guard let liked = l["value"] as? Int, let count = c["multiply"] as? Int,
-      let favored = f["favoured"] as? Bool else { throw BiliError(text: "互动状态返回不完整，请刷新") }
-    return VideoRelation(liked: liked != 0, coins: max(0, count), favorited: favored)
+    return VideoRelation(liked: liked, coins: coins, favorited: favorite)
   }
   /// Obtain the site's own browser identifier instead of manufacturing an identity for writes.
   func prepareVideoInteraction() async throws {
@@ -89,15 +88,23 @@ extension API {
     cookies["buvid3"] = id
     if let id4 = result["b_4"] as? String { cookies["buvid4"] = id4 }
   }
-  func setVideoLike(aid: Int, liked: Bool) async throws {
+  func setVideoLike(aid: Int, bvid: String? = nil, liked: Bool) async throws {
     try await prepareVideoInteraction()
-    _ = try await post("/x/web-interface/archive/like", ["aid": String(aid), "like": liked ? "1" : "2"])
+    _ = try await post("/x/web-interface/archive/like", ["aid": String(aid), "like": liked ? "1" : "2"], videoBVID: bvid)
   }
-  func addVideoCoins(aid: Int, amount: Int, alsoLike: Bool) async throws -> Bool {
+  func addVideoCoins(aid: Int, bvid: String? = nil, amount: Int, alsoLike: Bool) async throws -> Bool {
     guard (1...2).contains(amount) else { throw BiliError(text: "请选择 1 或 2 枚硬币") }
     try await prepareVideoInteraction()
-    let result = try await post("/x/web-interface/coin/add", ["aid": String(aid), "multiply": String(amount), "select_like": alsoLike ? "1" : "0"])
+    let result = try await post("/x/web-interface/coin/add", ["aid": String(aid), "multiply": String(amount), "select_like": alsoLike ? "1" : "0", "cross_domain": "true"], videoBVID: bvid)
     return result["like"] as? Bool ?? false
+  }
+  func tripleVideo(aid: Int, bvid: String) async throws -> TripleResult {
+    try await prepareVideoInteraction()
+    let data = try await post("/x/web-interface/archive/like/triple", ["aid": String(aid)], videoBVID: bvid)
+    guard let like = data["like"] as? Bool, let coin = data["coin"] as? Bool,
+      let fav = data["fav"] as? Bool, let count = data["multiply"] as? Int,
+      (0...2).contains(count) else { throw BiliError(text: "三连结果不完整，请刷新状态后查看") }
+    return TripleResult(like: like, coin: coin, favorite: fav, count: count)
   }
   func changeVideoFavorites(aid: Int, changes: FavoriteChanges) async throws {
     guard !changes.isEmpty else { return }
@@ -118,6 +125,7 @@ extension API {
 
 @MainActor @Observable final class VideoActionsModel {
   private(set) var aid = 0
+  private var bvid = ""
   private(set) var accountID: Int?
   private(set) var counts = VideoCounts()
   private(set) var relation: VideoRelation?
@@ -134,7 +142,7 @@ extension API {
   func load(detail: Detail, accountID: Int?, api: API) async {
     guard operation == nil else { return }
     if aid != detail.aid || self.accountID != accountID {
-      clear(); aid = detail.aid; self.accountID = accountID; counts = detail.counts
+      clear(); aid = detail.aid; bvid = detail.video.bvid; self.accountID = accountID; counts = detail.counts
     }
     revision = UUID()
     let token = revision, session = api.authenticationGeneration
@@ -158,7 +166,7 @@ extension API {
     operation = "like"; error = nil; notice = nil; needsVerification = false
     defer { if token == revision { operation = nil } }
     do {
-      try await api.setVideoLike(aid: target, liked: !before.liked)
+      try await api.setVideoLike(aid: target, bvid: bvid, liked: !before.liked)
       guard token == revision, session == api.authenticationGeneration else { return }
       relation?.liked = !before.liked
       counts.likes = max(0, counts.likes + (before.liked ? -1 : 1))
@@ -178,7 +186,7 @@ extension API {
     operation = "coin"; error = nil; notice = nil; needsVerification = false
     defer { if token == revision { operation = nil } }
     do {
-      let liked = try await api.addVideoCoins(aid: target, amount: amount, alsoLike: alsoLike)
+      let liked = try await api.addVideoCoins(aid: target, bvid: bvid, amount: amount, alsoLike: alsoLike)
       guard token == revision, session == api.authenticationGeneration else { return false }
       relation?.coins += amount; counts.coins += amount
       if liked && !before.liked { relation?.liked = true; counts.likes += 1 }
@@ -193,6 +201,28 @@ extension API {
       return false
     }
   }
+  func sendTriple(api: API) async -> Bool {
+    guard let before = relation, operation == nil, !loading, aid > 0 else { return false }
+    let token = revision, session = api.authenticationGeneration
+    operation = "triple"; error = nil; notice = nil; needsVerification = false
+    defer { if token == revision { operation = nil } }
+    do {
+      let result = try await api.tripleVideo(aid: aid, bvid: bvid)
+      guard token == revision, session == api.authenticationGeneration else { return false }
+      if result.like && !before.liked { relation?.liked = true; counts.likes += 1 }
+      if result.coin { relation?.coins += result.count; counts.coins += result.count }
+      if result.favorite && !before.favorited { relation?.favorited = true; counts.favorites += 1 }
+      let complete = relation?.liked == true && (relation?.coins ?? 0) > 0 && relation?.favorited == true
+      notice = complete ? "已三连" : "已完成部分操作，请查看互动状态"
+      if !complete { error = "三连未全部完成；已成功的操作已保留，请刷新状态后查看" }
+      return complete
+    } catch {
+      guard token == revision, session == api.authenticationGeneration else { return false }
+      failure(error); relation = nil
+      if !(error is BiliError) { self.error = "三连结果未确认，请刷新状态后查看" }
+      return false
+    }
+  }
   func favoritesSaved(aid: Int, isFavorite: Bool) {
     guard self.aid == aid else { return }
     if let before = relation, before.favorited != isFavorite {
@@ -202,7 +232,9 @@ extension API {
     notice = isFavorite ? "收藏已更新" : "已取消收藏"
   }
   private func failure(_ error: Error) {
-    self.error = error.localizedDescription
+    self.error = (error as? BiliError)?.code == -403
+      ? "哔哩哔哩拒绝了互动请求（-403），请完成官方验证后刷新状态"
+      : error.localizedDescription
     needsVerification = (error as? BiliError)?.requiresVerification ?? false
   }
 }

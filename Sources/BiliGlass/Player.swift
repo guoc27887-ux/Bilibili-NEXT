@@ -55,7 +55,7 @@ import SwiftUI
   private var sizeObservation: NSKeyValueObservation?
   private var timeObserver: Any?
   private var controlObservation: NSKeyValueObservation?
-  var onProgress: ((String, Int, Double) -> Void)?
+  var onProgress: ((String, Int, Double, Bool) -> Void)?
   func focusPlayer() {
     DispatchQueue.main.async { [weak self] in
       guard let view = self?.nativeView, !view.isHidden, let window = view.window, window.attachedSheet == nil else { return }
@@ -64,7 +64,7 @@ import SwiftUI
   }
   func togglePlayback() {
     guard player.currentItem != nil else { return }
-    if player.rate != 0 { player.pause(); return }
+    if player.rate != 0 { player.pause(); saveCurrentProgress(); return }
     let duration = player.currentItem?.duration.seconds ?? 0
     let current = player.currentTime().seconds
     if duration.isFinite, duration > 0, current.isFinite, current >= duration - 0.25 {
@@ -97,9 +97,9 @@ import SwiftUI
         }
         let duration = self.player.currentItem?.duration.seconds ?? 0
         if duration.isFinite, duration > 0, duration != self.durationSeconds { self.durationSeconds = duration }
-        if let d = self.detail, !self.isOffline, abs(time.seconds - self.lastSavedTime) >= 5 {
+        if let d = self.detail, abs(time.seconds - self.lastSavedTime) >= 5 {
           self.lastSavedTime = time.seconds
-          self.onProgress?(d.video.bvid, self.selectedCID, time.seconds)
+          self.onProgress?(d.video.bvid, self.selectedCID, time.seconds, false)
         }
       }
     }
@@ -500,14 +500,9 @@ import SwiftUI
   }
   func transferStats() async -> [String: Int] {
     guard let videoTransport else { return [:] }
-    var stats = await videoTransport.statistics()
-    if let diskCache {
-      for (key, value) in await diskCache.statistics() {
-        if key == "effectiveConnections" { stats[key] = min(stats[key] ?? value, value) }
-        else if key == "retriedBlocks" { stats[key] = (stats[key] ?? 0) + value }
-        else { stats[key] = max(stats[key] ?? 0, value) }
-      }
-    }
+    // Disk-cache permits measure network work; outer permits include cached reads.
+    let stats = if let diskCache { await diskCache.statistics() }
+      else { await videoTransport.statistics() }
     return stats
   }
   func cdnAttempts() async -> [[String: String]] { await cdnTransport?.diagnostics() ?? [] }
@@ -550,7 +545,14 @@ import SwiftUI
     loading = false
     error = e.localizedDescription
   }
+  func saveCurrentProgress() {
+    guard let detail, player.currentItem != nil else { return }
+    let seconds = player.currentTime().seconds
+    guard seconds.isFinite, seconds > 0 else { return }
+    onProgress?(detail.video.bvid, selectedCID, seconds, true)
+  }
   private func beginChange() {
+    saveCurrentProgress()
     endTemporarySpeed()
     task?.cancel()
     stallMonitor?.cancel()

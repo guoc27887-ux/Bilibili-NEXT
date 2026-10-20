@@ -72,6 +72,20 @@ private actor SlowPlayerConsumer {
     #expect(!FileManager.default.fileExists(atPath: directory.path))
     try? FileManager.default.removeItem(at: root)
   }
+  @Test func twentyFourReadAheadLanesAreUsedWithoutExceedingTheSetting() async throws {
+    let source = DiskFixture(delay: .milliseconds(80)), length: Int64 = 26 * 1_048_576
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let cache = try PlaybackDiskCache(source: source, videoURLs: [url], connections: 24, reserveSpace: 0, root: root)
+    _ = try await read(cache, 0, 99, length: length)
+    await cache.start()
+    for _ in 0..<200 {
+      if await source.peak >= 24 { break }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(await source.peak == 24)
+    #expect(await cache.statistics()["configuredConnections"] == 24)
+    await cache.stop(); try? FileManager.default.removeItem(at: root)
+  }
   @Test func concurrentOverlappingRequestsShareNetworkPagesAndHonorConnectionLimit() async throws {
     let source = DiskFixture(), length: Int64 = 4_300_000
     let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

@@ -8,7 +8,7 @@ import VideoToolbox
 struct BiliError: LocalizedError {
   let text: String
   var code: Int? = nil
-  var requiresVerification: Bool { [-351, -352, -412].contains(code ?? 0) || text.contains("验证") }
+  var requiresVerification: Bool { [-351, -352, -401, -403, -412].contains(code ?? 0) || text.contains("验证") }
   var errorDescription: String? { text }
 }
 struct Video: Identifiable, Codable, Hashable {

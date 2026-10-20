@@ -5,6 +5,7 @@ import CryptoKit
 import SwiftUI
 
 struct SavedDownload: Identifiable, Codable {
+  var completedRowID: String { "saved-\(id)" }
   var id: UUID
   var video: Video
   var cid: Int
@@ -29,6 +30,7 @@ struct DownloadIndex: Codable {
   var jobs: [PendingDownload]
 }
 @MainActor @Observable final class DownloadJob: Identifiable {
+  var pendingRowID: String { "pending-\(id)" }
   let id: UUID
   let video: Video
   let cid: Int
@@ -193,7 +195,7 @@ enum ParallelMediaDownload {
       }
     }
   }
-  func persist() {
+  @discardableResult func persist() -> Bool {
     let state = DownloadIndex(
       saved: saved,
       jobs: jobs.filter { !$0.finished }.map {
@@ -203,8 +205,10 @@ enum ParallelMediaDownload {
       })
     do { try JSONEncoder().encode(state).write(to: index, options: .atomic) } catch {
       message = "无法保存任务记录"
+      return false
     }
     lastSave = Date()
+    return true
   }
   func enqueue(video: Video, cid: Int, qn: Int, api: API, cached: Bool = false) {
     var folder = AppPaths.cache
@@ -273,6 +277,27 @@ enum ParallelMediaDownload {
       }
       try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
       try FileManager.default.createDirectory(at: job.folder, withIntermediateDirectories: true)
+      let output = temp.appendingPathComponent("complete.mp4")
+      let name = "\(safeFilename(job.video.title))_\(job.video.bvid)_\(job.cid)_\(job.qn)_\(job.id.uuidString.prefix(6))"
+      let requested = job.folder.appendingPathComponent(name + ".mp4")
+      var prepared = try await downloadIO { try DownloadPublication.restore(output) }
+      // Recover pre-checkpoint releases only when the published MP4 and the validated
+      // mux output match, ignoring export timestamps but comparing all media bytes.
+      if prepared == nil, FileManager.default.fileExists(atPath: requested.path),
+        FileManager.default.fileExists(atPath: output.path) {
+        let matches = try await downloadIO {
+          (try? DownloadPublication.digest(requested)) == (try DownloadPublication.digest(output))
+        }
+        if matches {
+          try await Self.validateMedia(output)
+          let quality = Self.qualityName(job.qn)
+          prepared = try await downloadIO { try DownloadPublication.prepare(output, quality: quality) }
+        }
+      }
+      if let prepared {
+        try await finish(job, api: api, output: output, requested: requested, prepared: prepared, temp: temp)
+        return
+      }
       job.status = "获取清晰度"
       persist()
       let streams = try await api.streams(bvid: job.video.bvid, cid: job.cid)
@@ -289,7 +314,7 @@ enum ParallelMediaDownload {
       ) { p in
         Task { @MainActor in
           guard job.runID == token, !job.cancelled, !job.finished, job.error == nil else { return }
-          job.progress = p * 0.8
+          job.progress = max(job.progress, p * 0.8)
           if Date().timeIntervalSince(self.lastSave) > 1 { self.persist() }
         }
       }
@@ -301,54 +326,18 @@ enum ParallelMediaDownload {
       ) { p in
         Task { @MainActor in
           guard job.runID == token, !job.cancelled, !job.finished, job.error == nil else { return }
-          job.progress = 0.8 + p * 0.15
+          job.progress = max(job.progress, 0.8 + p * 0.15)
         }
       }
       try Task.checkCancellation()
       job.status = "合并音视频"
       persist()
-      let output = temp.appendingPathComponent("complete.mp4")
       try? FileManager.default.removeItem(at: output)
       try await Self.mux(video: v, audio: a, output: output)
       try Task.checkCancellation()
-      let name =
-        "\(safeFilename(job.video.title))_\(job.video.bvid)_\(job.cid)_\(job.qn)_\(job.id.uuidString.prefix(6))"
-      let target = job.folder.appendingPathComponent(name + ".mp4")
-      let partial = job.folder.appendingPathComponent(".\(job.id).partial")
-      defer { try? FileManager.default.removeItem(at: partial) }
-      try? FileManager.default.removeItem(at: partial)
-      try await downloadIO {
-        try FileManager.default.copyItem(at: output, to: partial)
-        try Task.checkCancellation()
-        try FileManager.default.moveItem(at: partial, to: target)
-      }
-      var sidecar: String?
-      if UserDefaults.standard.object(forKey: "downloadDanmaku") as? Bool ?? true {
-        job.status = "保存弹幕"
-        persist()
-        do {
-          let items = try await DanmakuController.all(
-            cid: job.cid, duration: job.video.duration, api: api)
-          let url = job.folder.appendingPathComponent(name + ".danmaku.json")
-          try JSONEncoder().encode(items).write(to: url, options: .atomic)
-          try DanmakuController.xml(items, cid: job.cid).write(
-            to: job.folder.appendingPathComponent(name + ".xml"), atomically: true, encoding: .utf8)
-          sidecar = url.path
-        } catch { message = "视频已保存，弹幕下载失败，可单独重试" }
-      }
-      let size =
-        (try FileManager.default.attributesOfItem(atPath: target.path)[.size] as? NSNumber)?
-        .int64Value
-      saved.insert(
-        SavedDownload(
-          id: job.id, video: job.video, cid: job.cid, quality: streams.names[job.qn] ?? "\(job.qn)",
-          path: target.path, date: Date(), cached: job.cached, danmakuPath: sidecar, byteCount: size
-        ), at: 0)
-      job.progress = 1
-      job.status = "已完成"
-      job.finished = true
-      persist()
-      try? FileManager.default.removeItem(at: temp)
+      let quality = streams.names[job.qn] ?? Self.qualityName(job.qn)
+      let checkpoint = try await downloadIO { try DownloadPublication.prepare(output, quality: quality) }
+      try await finish(job, api: api, output: output, requested: requested, prepared: checkpoint, temp: temp)
     } catch {
       if job.cancelled || Task.isCancelled {
         job.cancelled = true
@@ -359,6 +348,55 @@ enum ParallelMediaDownload {
       }
       persist()
     }
+  }
+  private func finish(_ job: DownloadJob, api: API, output: URL, requested: URL,
+                      prepared: PreparedDownload, temp: URL) async throws {
+    job.status = "保存视频"; job.progress = max(job.progress, 0.95); persist()
+    let target = try await downloadIO { try DownloadPublication.publish(output, to: requested, prepared: prepared) }
+    try Task.checkCancellation()
+    var sidecar: String?
+    if UserDefaults.standard.object(forKey: "downloadDanmaku") as? Bool ?? true {
+      job.status = "保存弹幕"; job.progress = 0.97; persist()
+      do {
+        let items = try await DanmakuController.all(cid: job.cid, duration: job.video.duration, api: api)
+        try Task.checkCancellation()
+        let url = target.deletingPathExtension().appendingPathExtension("danmaku.json")
+        try await downloadIO {
+          try JSONEncoder().encode(items).write(to: url, options: .atomic)
+          try DanmakuController.xml(items, cid: job.cid).write(
+            to: target.deletingPathExtension().appendingPathExtension("xml"), atomically: true, encoding: .utf8)
+        }
+        sidecar = url.path
+      } catch {
+        try Task.checkCancellation()
+        message = "视频已保存，弹幕下载失败，可单独重试"
+      }
+    }
+    try Task.checkCancellation()
+    let previous = saved
+    saved.removeAll { $0.id == job.id }
+    saved.insert(SavedDownload(id: job.id, video: job.video, cid: job.cid, quality: prepared.quality,
+      path: target.path, date: Date(), cached: job.cached, danmakuPath: sidecar,
+      byteCount: prepared.byteCount), at: 0)
+    job.finished = true; job.progress = 1; job.status = "已完成"
+    guard persist() else {
+      saved = previous; job.finished = false
+      throw BiliError(text: "视频已保存，任务记录保存失败，请重试")
+    }
+    // Remove transient parts only after the completed index is safely on disk.
+    try? FileManager.default.removeItem(at: temp)
+  }
+  private static func qualityName(_ qn: Int) -> String {
+    [16:"360P 流畅", 32:"480P 清晰", 64:"720P 高清", 74:"720P 60帧", 80:"1080P 高清",
+     112:"1080P 高码率", 116:"1080P 60帧", 120:"4K", 125:"HDR", 126:"杜比视界", 127:"8K"][qn] ?? "\(qn)"
+  }
+  static func validateMedia(_ url: URL) async throws {
+    let result = AVURLAsset(url: url)
+    let duration = try await result.load(.duration).seconds
+    guard duration.isFinite, duration > 0,
+      try await result.loadTracks(withMediaType: .video).count == 1,
+      try await result.loadTracks(withMediaType: .audio).count == 1
+    else { throw BiliError(text: "合并校验失败") }
   }
   func saveDanmaku(video: Video, cid: Int, api: API) async {
     let p = NSSavePanel()
@@ -414,10 +452,7 @@ enum ParallelMediaDownload {
     else { throw BiliError(text: "无法合并视频") }
     try await exporter.export(to: output, as: .mp4)
     try await Task.detached(priority: .utility) { try MP4Compatibility.normalizeOwnedFile(output) }.value
-    let result = AVURLAsset(url: output)
-    guard try await result.loadTracks(withMediaType: .video).count == 1,
-      try await result.loadTracks(withMediaType: .audio).count == 1
-    else { throw BiliError(text: "合并校验失败") }
+    try await validateMedia(output)
   }
 
 }

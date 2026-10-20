@@ -262,7 +262,7 @@ struct ProtoReader {
     var ids = Set<String>()
     return items.filter { ids.insert($0.id).inserted }.sorted { $0.time < $1.time }
   }
-  static func xml(_ items: [Danmaku], cid: Int) -> String {
+  nonisolated static func xml(_ items: [Danmaku], cid: Int) -> String {
     func escape(_ s: String) -> String {
       s.replacingOccurrences(of: "&", with: "&amp;").replacingOccurrences(of: "<", with: "&lt;")
         .replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "\"", with: "&quot;")

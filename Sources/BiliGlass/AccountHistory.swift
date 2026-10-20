@@ -7,6 +7,26 @@ struct AccountHistoryEntry: Identifiable {
   let progress: Int
   let viewedAt: Date
   let part: String
+  var isLocal = false
+  /// The account feed and this device can contain different episodes of one video.
+  /// Keep the most recently watched episode, without assigning an unknown legacy CID.
+  static func merged(remote: [Self], local: [HistoryEntry], accountID: String?) -> [Self] {
+    var newest: [String: Self] = [:]
+    for entry in remote.sorted(by: { $0.viewedAt > $1.viewedAt }) {
+      if newest[entry.video.bvid] == nil { newest[entry.video.bvid] = entry }
+    }
+    for entry in local where entry.accountID == nil || entry.accountID == accountID || entry.accountID == "guest" {
+      guard newest[entry.video.bvid].map({ $0.viewedAt < entry.date }) ?? true else { continue }
+      let cid = entry.lastCID ?? (entry.positions.count == 1 ? Int(entry.positions.keys.first ?? "") : nil) ?? 0
+      let seconds = entry.positions["\(cid)"] ?? 0
+      let progress = seconds.isFinite && seconds >= 0 && seconds < Double(Int.max) ? Int(seconds) : 0
+      newest[entry.video.bvid] = Self(video: entry.video, cid: cid, progress: progress,
+        viewedAt: entry.date, part: "", isLocal: true)
+    }
+    return newest.values.sorted {
+      $0.viewedAt == $1.viewedAt ? $0.id < $1.id : $0.viewedAt > $1.viewedAt
+    }
+  }
   static func parse(_ json: [String: Any]) -> Self? {
     let history = json["history"] as? [String: Any] ?? [:]
     guard history["business"] as? String == "archive",
@@ -77,6 +97,11 @@ struct AccountHistoryEntry: Identifiable {
 struct HistoryPage: View {
   @Bindable var store: Store
   @AppStorage("historySource") private var source = "account"
+  @AppStorage("syncWatchHistory") private var syncWatchHistory = true
+  private var combined: [AccountHistoryEntry] {
+    AccountHistoryEntry.merged(remote: store.accountHistory.items, local: store.history,
+      accountID: store.api.cookies["DedeUserID"])
+  }
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 20) {
@@ -97,15 +122,21 @@ struct HistoryPage: View {
               Label("登录后查看账号历史", systemImage: "clock.badge.person.crop")
             } actions: { Button("登录") { store.login() } }
           } else {
-            Text("B 站账号中的视频观看记录").font(.callout).foregroundStyle(.secondary)
+            Text("账号与本机记录，按最近观看合并").font(.callout).foregroundStyle(.secondary)
+            if !syncWatchHistory {
+              Text("观看进度同步已关闭，新记录仅保存在本机。").font(.caption).foregroundStyle(.secondary)
+            } else if let error = store.historySync.error {
+              Text(error + "。本机记录已保留。").font(.caption).foregroundStyle(.secondary)
+            }
             GlassEffectContainer(spacing: 0) {
               LazyVGrid(columns: [GridItem(.adaptive(minimum: 240, maximum: 390), spacing: 18)], spacing: 20) {
-                ForEach(store.accountHistory.items) { entry in
+                ForEach(combined) { entry in
                   Button { store.openHistory(entry) } label: {
                     VStack(alignment: .leading, spacing: 8) {
                       VideoCard(video: entry.video, showsViews: false)
                       HStack {
                         Text(entry.viewedAt.formatted(AppDateFormat.timestamp))
+                        if entry.isLocal { Text("本机").font(.caption2) }
                         Spacer()
                         Text(entry.progress < 0 ? "已看完" : "看到 \(String(format: "%d:%02d", max(0, entry.progress) / 60, max(0, entry.progress) % 60))")
                       }.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 12)
@@ -114,7 +145,7 @@ struct HistoryPage: View {
                 }
               }
             }
-            if store.accountHistory.items.isEmpty && !store.accountHistory.loading && store.accountHistory.error == nil {
+            if combined.isEmpty && !store.accountHistory.loading && store.accountHistory.error == nil {
               ContentUnavailableView("暂无视频观看记录", systemImage: "clock")
             }
             LoadMoreFooter(loading: store.accountHistory.loading, hasMore: store.accountHistory.hasMore,

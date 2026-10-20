@@ -36,7 +36,7 @@ actor PlaybackDiskCache: HTTPRangeStreaming {
     self.source = source; self.videoURLs = videoURLs
     permits = VideoStreamPermits(limit: max(1, min(32, connections)))
     self.capacity = capacity; self.reserveSpace = reserveSpace
-    prefetchConnections = max(1, min(4, connections / 2))
+    prefetchConnections = max(1, min(32, connections))
     directory = root.appendingPathComponent("\(getpid())-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     let descriptor = Darwin.open(directory.appendingPathComponent(".lease").path, O_CREAT | O_RDWR, 0o600)
@@ -169,7 +169,7 @@ actor PlaybackDiskCache: HTTPRangeStreaming {
         try Task.checkCancellation()
         let (data, response) = try await buffer.complete(length: range.length)
         try data.write(to: file, options: .atomic)
-        if video { await permits.release() }
+        if video { await permits.release(succeeded: true) }
         return Page(file: file, response: response)
       } catch {
         if video { await permits.release() }; throw error

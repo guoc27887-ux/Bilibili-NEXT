@@ -10,6 +10,7 @@ private actor CDNFixture: HTTPRangeStreaming {
     var bodyDelay: Duration = .zero
     var invalid = false
     var truncated = false
+    var chunks = 1
   }
   let plans: [String: Plan]
   var calls: [(String, HTTPByteRange)] = []
@@ -33,9 +34,12 @@ private actor CDNFixture: HTTPRangeStreaming {
       contentRange: HTTPContentRange(start: expectedRange.start, endInclusive: expectedRange.endInclusive,
                                      completeLength: expectedCompleteLength ?? 1_000_000),
       contentLength: expectedRange.length, contentType: "video/mp4"))
-    try await Task.sleep(for: plan.bodyDelay)
     let count = Int(expectedRange.length) - (plan.truncated ? 1 : 0)
-    try await onChunk(Data((0..<count).map { UInt8((Int(expectedRange.start) + $0) % 251) }))
+    let step = max(1, count / plan.chunks)
+    for start in stride(from: 0, to: count, by: step) {
+      try await Task.sleep(for: plan.bodyDelay)
+      try await onChunk(Data((start..<min(count, start + step)).map { UInt8((Int(expectedRange.start) + $0) % 251) }))
+    }
     return HTTPRangeStreamResult(byteCount: UInt64(count))
   }
 }
@@ -82,7 +86,8 @@ private actor BrokenNodeFixture: HTTPRangeStreaming {
     let next = CDNOutput()
     try await read(transport, url: choice.representation.primaryURL, output: next, start: 4096, end: 8191)
     #expect(await next.data == Data((4096...8191).map { UInt8($0 % 251) }))
-    #expect(await transport.activeHosts()["videoHost"] == "primary.test")
+    #expect(await transport.activeHosts()["videoHost"] == "backup.test")
+    #expect(await transport.activeHosts()["videoSwitches"] == "1")
   }
   @Test func backupWithDifferentMediaIsRejectedBeforeAnyBytesAreSpliced() async throws {
     let fixture = BrokenNodeFixture(mismatchedBackup: true)
@@ -197,6 +202,14 @@ private actor BrokenNodeFixture: HTTPRangeStreaming {
     }
     #expect(start.duration(to: .now) < .seconds(1))
     #expect(await fixture.active == 0)
+  }
+  @Test func progressingParallelBlockIsNotAbandonedAtTheOldTotalDeadline() async throws {
+    let fixture = CDNFixture(["a.test": .init(bodyDelay: .milliseconds(40), chunks: 8)])
+    let transport = CDNTransport(source: fixture, health: CDNHealth(), idleTimeout: .milliseconds(200), rangeTimeout: .milliseconds(150))
+    let output = CDNOutput()
+    try await read(transport, url: URL(string: "https://a.test/media")!, output: output)
+    #expect(await output.data.count == 16)
+    #expect(await transport.diagnostics().isEmpty)
   }
   @Test func queuedFirstResponseIsNotMistakenForAnIdleBody() async throws {
     let fixture = CDNFixture(["a.test": .init(headerDelay: .milliseconds(150))])

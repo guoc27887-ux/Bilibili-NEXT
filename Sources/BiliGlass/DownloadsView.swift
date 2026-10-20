@@ -49,7 +49,7 @@ struct DownloadPage: View {
           }.padding(16).floatingGlass(18)
         }
         ForEach(
-          visibleJobs
+          visibleJobs, id: \.pendingRowID
         ) { job in
           HStack(spacing: 16) {
             Thumbnail(url: job.video.cover, mode: .fill).frame(width: 116, height: 72).clipShape(
@@ -80,7 +80,7 @@ struct DownloadPage: View {
           }.padding(16).floatingGlass(22)
         }
         ForEach(
-          visibleSaved
+          visibleSaved, id: \.completedRowID
         ) { entry in
           HStack(spacing: 16) {
             Thumbnail(url: entry.video.cover, mode: .fill).frame(width: 116, height: 72).clipShape(

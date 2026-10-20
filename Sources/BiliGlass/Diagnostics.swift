@@ -67,6 +67,15 @@ import Synchronization
         "comments": ["loaded": store.comments.items.count, "page": store.comments.page,
                      "hasMore": store.comments.hasMore, "error": store.comments.error ?? ""] as [String: Any],
         "interactionError": store.videoActions.error ?? "",
+        "history": [
+          "syncing": store.historySync.syncing, "syncError": store.historySync.error ?? "",
+          "localCount": store.history.count, "remoteCount": store.accountHistory.items.count,
+          "remoteLatest": store.accountHistory.items.prefix(3).map {
+            ["bvid": $0.video.bvid, "cid": $0.cid, "progress": $0.progress,
+             "viewedAt": $0.viewedAt.timeIntervalSince1970] as [String: Any]
+          },
+        ] as [String: Any],
+        "interaction": store.videoActions.relation.map { ["liked": $0.liked, "coins": $0.coins, "favorite": $0.favorited] as [String: Any] } ?? [:],
         "commentCursor": store.comments.paginationDiagnostics,
         "loadingStage": store.playback.loadingMessage,
         "cdn": store.playback.routeDiagnostics,

@@ -94,6 +94,14 @@ private actor RecoverableRangeFixture: HTTPRangeStreaming {
     #expect(stats["retriedBlocks"] == 2)
     #expect(stats["effectiveConnections"] == 2)
   }
+  @Test func backoffDoesNotClampTwentyFourToFourAndRecovers() async throws {
+    let permits = VideoStreamPermits(limit: 24, recoveryInterval: .zero)
+    await permits.backOff()
+    #expect(await permits.statistics()["effectiveConnections"] == 12)
+    for _ in 0..<300 { try await permits.acquire(); await permits.release(succeeded: true) }
+    #expect(await permits.statistics()["effectiveConnections"] == 24)
+    #expect(await permits.statistics()["activeVideoRequests"] == 0)
+  }
   @Test func firstBytesReachThePlayerBeforeTheFirstBlockFinishes() async throws {
     let output = StreamOutput()
     let fixture = RangeFixture(uniform: true, earlyOutput: output)

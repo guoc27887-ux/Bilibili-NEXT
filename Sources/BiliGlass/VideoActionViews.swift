@@ -3,7 +3,7 @@ import CoreImage.CIFilterBuiltins
 import SwiftUI
 
 private enum VideoActionSheet: String, Identifiable {
-  case coin, favorite, share
+  case coin, triple, favorite, share
   var id: String { rawValue }
 }
 struct VideoActionBar: View {
@@ -30,6 +30,8 @@ struct VideoActionBar: View {
         }
       }
       HStack(spacing: 12) {
+        Button { authenticated { sheet = .triple } } label: { Label("一键三连", systemImage: "hand.thumbsup.circle") }
+          .disabled(disabled)
         Button { authenticated { Task { await store.addLater(detail.aid) } } } label: { Label("稍后再看", systemImage: "text.badge.plus") }
         if store.account != nil {
           Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }
@@ -55,6 +57,7 @@ struct VideoActionBar: View {
       .sheet(item: $sheet) { target in
         switch target {
         case .coin: CoinSheet(store: store, detail: detail)
+        case .triple: TripleSheet(store: store, detail: detail)
         case .favorite: FavoriteSheet(store: store, detail: detail)
         case .share: VideoShareSheet(store: store, detail: detail)
         }
@@ -72,7 +75,7 @@ struct VideoActionBar: View {
           Text(count >= 10000 ? String(format: "%.1f万", Double(count) / 10000) : String(count)).font(.caption.monospacedDigit()).foregroundStyle(.secondary)
         }
         Spacer(minLength: 0)
-      }.padding(.horizontal, 8).padding(.vertical, 5).frame(maxWidth: .infinity, minHeight: 40)
+      }.padding(.horizontal, 8).padding(.vertical, 5).frame(maxWidth: .infinity, minHeight: 40).contentShape(.rect(cornerRadius: 18))
     }.buttonStyle(.plain).foregroundStyle(.primary)
       .glassEffect(.regular.tint(active ? biliPink.opacity(0.22) : .clear).interactive(), in: .rect(cornerRadius: 18))
       .accessibilityLabel(title).accessibilityValue("\(count)")
@@ -176,6 +179,41 @@ struct CoinSheet: View {
   }
 }
 
+struct TripleSheet: View {
+  @Bindable var store: Store
+  let detail: Detail
+  @State private var verify = false
+  @Environment(\.dismiss) private var dismiss
+  private var model: VideoActionsModel { store.videoActions }
+  private var busy: Bool { model.operation != nil || model.loading }
+  var body: some View {
+    VStack(alignment: .leading, spacing: 20) {
+      HStack { Label("一键三连", systemImage: "hand.thumbsup.circle").font(.title2.weight(.semibold))
+        Spacer(); Button("关闭") { dismiss() }.disabled(busy).keyboardShortcut(.cancelAction) }
+      Text(detail.video.title).font(.headline).lineLimit(2)
+      VStack(alignment: .leading, spacing: 14) {
+        Label("点赞", systemImage: "hand.thumbsup")
+        Label(detail.copyright == 2 ? "投币，最多 1 枚" : "投币，最多 2 枚", systemImage: "c.circle")
+        Label("收藏到默认收藏夹", systemImage: "star")
+      }.frame(maxWidth: .infinity, alignment: .leading).padding(20).floatingGlass(22)
+      Text("已完成的操作由服务器判断。投币后无法撤回。").font(.caption).foregroundStyle(.secondary)
+      if let error = model.error { Text(error).font(.callout).foregroundStyle(.secondary) }
+      HStack {
+        Button("刷新状态") { Task { await refresh() } }.disabled(busy)
+        if model.needsVerification { Button("完成验证") { verify = true }.disabled(busy) }
+        Spacer()
+        Button(model.operation == "triple" ? "提交中…" : "确认三连") {
+          Task { if await model.sendTriple(api: store.api) { dismiss() } }
+        }.buttonStyle(.glassProminent).disabled(busy || model.relation == nil)
+      }
+    }.buttonStyle(.glass).padding(24).frame(width: 440).background { GlassBackdrop() }.tint(biliPink)
+      .interactiveDismissDisabled(busy)
+      .task { await refresh() }
+      .sheet(isPresented: $verify, onDismiss: { Task { await refresh() } }) { InteractionVerification(store: store, detail: detail) }
+  }
+  private func refresh() async { await model.load(detail: detail, accountID: store.account?.mid, api: store.api) }
+}
+
 struct FavoriteSheet: View {
   @Bindable var store: Store
   let detail: Detail
@@ -199,16 +237,20 @@ struct FavoriteSheet: View {
           LazyVStack(spacing: 10) {
             if editor.folders.isEmpty, editor.loaded { Text("还没有收藏夹").foregroundStyle(.secondary).padding(24) }
             ForEach(editor.folders) { folder in
-              Toggle(isOn: Binding(get: { editor.selected.contains(folder.id) }, set: { selected in
-                if selected { editor.selected.insert(folder.id) } else { editor.selected.remove(folder.id) }
-              })) {
+              Button {
+                if editor.selected.contains(folder.id) { editor.selected.remove(folder.id) }
+                else { editor.selected.insert(folder.id) }
+              } label: {
                 HStack(spacing: 12) {
+                  Image(systemName: editor.selected.contains(folder.id) ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(editor.selected.contains(folder.id) ? biliPink : .secondary)
                   Image(systemName: folder.isPrivate ? "lock" : "folder")
                   Text(folder.title).lineLimit(2)
                   Spacer()
                   Text("\(folder.count)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
-                }
-              }.toggleStyle(.checkbox).padding(14).floatingGlass(16).disabled(editor.saving || !editor.loaded)
+                }.padding(14).frame(maxWidth: .infinity).contentShape(.rect(cornerRadius: 16))
+              }.buttonStyle(.plain).floatingGlass(16).disabled(editor.saving || !editor.loaded)
+                .accessibilityAddTraits(editor.selected.contains(folder.id) ? .isSelected : [])
             }
           }.padding(4)
         }.frame(minHeight: 120, maxHeight: 280)

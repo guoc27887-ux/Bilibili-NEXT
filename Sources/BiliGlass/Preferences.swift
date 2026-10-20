@@ -24,6 +24,7 @@ struct PreferencesView: View {
   @AppStorage("interfaceAnimations") private var animations = true
   @AppStorage("autoLoadMore") private var autoLoadMore = true
   @AppStorage("rememberPosition") private var rememberPosition = true
+  @AppStorage("syncWatchHistory") private var syncWatchHistory = true
   @AppStorage("autoPlay") private var autoPlay = true
   @AppStorage("commentSort") private var commentSort = 1
   @State private var backgroundError: String?
@@ -56,7 +57,7 @@ struct PreferencesView: View {
                 Button { withAnimation(reduceMotion || !animations ? nil : .smooth(duration: 0.22)) { tab = index } } label: {
                   Label(categories[index].0, systemImage: categories[index].1)
                     .font(.body.weight(tab == index ? .semibold : .regular))
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(12).contentShape(.rect(cornerRadius: 14))
                 }.buttonStyle(.plain)
                   .appGlass(14, tint: tab == index ? biliPink.opacity(0.2) : .clear, interactive: true)
               }
@@ -97,6 +98,9 @@ struct PreferencesView: View {
       section("播放") {
         toggleRow("打开视频后自动播放", value: $autoPlay)
         toggleRow("记住观看位置", value: $rememberPosition)
+        toggleRow("同步观看进度到账号", value: $syncWatchHistory)
+        Text("登录后同步新观看的视频；关闭后仅保存在本机。历史页始终保留本机记录入口。")
+          .font(.caption).foregroundStyle(.secondary)
         sliderRow("前向缓冲", value:$bufferSeconds, range:5...120, step:5, display:"\(Int(bufferSeconds)) 秒")
         HStack { Text("HDR 显示"); Spacer(); Text(AVPlayer.eligibleForHDRPlayback ? "系统可用" : "系统当前不可用").foregroundStyle(.secondary) }
         Text("清晰度以视频、账号权限和设备支持为准。").font(.caption).foregroundStyle(.secondary)
@@ -119,7 +123,7 @@ struct PreferencesView: View {
       section("键盘控制") {
         settingLine("空格", "暂停 / 继续")
         settingLine("← / →", "快退 / 快进 5 秒")
-        settingLine("按住 →", "临时 3 倍速，松开恢复")
+        settingLine("按住 →", "在线 2× / 本地 3×，松开恢复")
         settingLine("⌃⌘F / Esc", "进入 / 退出全屏")
         Text("输入文字时不触发播放快捷键。").font(.caption).foregroundStyle(.secondary)
       }
@@ -250,7 +254,7 @@ struct PreferencesView: View {
       HStack { Text("系统"); Spacer(); Text("macOS 26 及以上").foregroundStyle(.secondary) }
       Text("非官方哔哩哔哩客户端").foregroundStyle(.secondary)
       Link("开源播放组件 BiliKit", destination: URL(string: "https://github.com/shiinayane/BiliKit-Mac")!)
-        .foregroundStyle(biliPink)
+        .foregroundStyle(.primary)
     }
   }
 }

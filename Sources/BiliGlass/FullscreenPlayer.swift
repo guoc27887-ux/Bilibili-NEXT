@@ -91,11 +91,12 @@ struct FullscreenPlayerContent: View {
           DanmakuSettingsButton()
           Button { store.playback.showsDetails.toggle() } label: { Image(systemName: "waveform.path.ecg") }.help("播放详情").accessibilityLabel("播放详情")
           if let streams = store.playback.streams {
-            Menu(streams.names[store.playback.selectedQuality] ?? "清晰度") {
+            Menu {
               ForEach(Array(Set(streams.videos.map(\.id))).sorted(by:>),id:\.self) { quality in
                 Button(streams.names[quality] ?? String(quality)) { store.playback.selectQuality(quality,api:store.api) }
               }
-            }
+            } label: { Text(streams.names[store.playback.selectedQuality] ?? "清晰度").foregroundStyle(.primary) }
+              .tint(.primary)
           }
         }.buttonStyle(.glass).padding(14).glassEffect(.regular,in:.rect(cornerRadius:22))
           .onHover { hoveringControls = $0; if $0 { wake() } }

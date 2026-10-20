@@ -91,7 +91,7 @@ struct CommentsView: View {
           if reply.count > children.count && comments.childHasMore[reply.id] != false {
             Button(comments.childLoading.contains(reply.id) ? "加载回复中…" : comments.expanded[reply.id] == nil ? "展开回复（\(reply.count)）" : "加载更多回复") {
               Task { await comments.children(reply, aid: aid, api: store.api) }
-            }.buttonStyle(.plain).foregroundStyle(biliPink).padding(.leading, 44).disabled(
+            }.buttonStyle(.plain).foregroundStyle(.primary).fontWeight(.medium).padding(.leading, 44).disabled(
               comments.childLoading.contains(reply.id))
           }
           if let error = comments.childErrors[reply.id] {
@@ -139,7 +139,7 @@ struct ReplyRow: View {
         if reply.message.count > 350 || reply.message.split(separator: "\n").count > 8 {
           Button(expandedText ? "收起" : "展开全文") { withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { expandedText.toggle() } }.font(.caption).buttonStyle(
             .plain
-          ).foregroundStyle(biliPink)
+          ).foregroundStyle(.primary).fontWeight(.medium)
         }
         ForEach(reply.videoLinks, id: \.url) { link in
           CommentVideoCard(link: link, store: store)
@@ -350,7 +350,7 @@ struct ProfilePage: View {
             Text(d.rawValue)
             Spacer(minLength: 0)
           }
-          .padding(17).frame(maxWidth: .infinity).floatingGlass(18)
+          .padding(17).frame(maxWidth: .infinity).floatingGlass(18).contentShape(.rect(cornerRadius: 18))
         }.buttonStyle(.plain)
       }
     }

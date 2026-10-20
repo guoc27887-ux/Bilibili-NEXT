@@ -89,7 +89,7 @@ struct NativeDynamicsPage: View {
           } label: {
             Image(systemName: "arrow.clockwise")
           }.buttonStyle(.glass).disabled(loading).help("刷新动态")
-        }.padding(16).floatingGlass(22)
+        }.padding(16).floatingGlass(22).contentShape(.rect(cornerRadius: 22))
         if let error { ErrorBanner(text: error) { Task { await load(reset: true) } } }
         ForEach(items) { item in
           VStack(alignment: .leading, spacing: 14) {
@@ -180,7 +180,7 @@ struct DynamicContent: View {
             Text(video.title).font(.headline).lineLimit(3).multilineTextAlignment(.leading)
             Spacer(minLength: 0)
             Image(systemName: "play.circle.fill").font(.title)
-          }.padding(12).appGlass(18)
+          }.padding(12).appGlass(18).contentShape(.rect(cornerRadius: 18))
         }.buttonStyle(.plain)
       }
       if !entry.pictures.isEmpty {
@@ -320,7 +320,7 @@ struct NativeCollectionsPage: View {
               }
               Spacer()
               Image(systemName: "chevron.right").foregroundStyle(.secondary)
-            }.padding(16).floatingGlass(22)
+            }.padding(16).floatingGlass(22).contentShape(.rect(cornerRadius: 22))
           }.buttonStyle(.plain)
         }
         if loading {

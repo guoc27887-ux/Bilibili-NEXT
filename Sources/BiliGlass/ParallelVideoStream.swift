@@ -101,7 +101,7 @@ final class ParallelVideoStream: HTTPRangeStreaming, Sendable {
               }
             }
             let block = try await buffer.block(index: index, streamed: index == 0)
-            await permits.release()
+            await permits.release(succeeded: true)
             return block
           } catch {
             await permits.release()
@@ -196,10 +196,17 @@ actor VideoStreamPermits {
   private var active = 0
   private var blocks = 0
   private var limit: Int
+  private let maximum: Int
+  private let recoveryInterval: Duration
+  private var successfulBlocks = 0
+  private var lastFailure: ContinuousClock.Instant?
   private var retries = 0
   private var lastReduction: ContinuousClock.Instant?
   private var waiters: [(UUID, CheckedContinuation<Void, Error>, Bool)] = []
-  init(limit: Int) { self.limit = limit }
+  init(limit: Int, recoveryInterval: Duration = .seconds(2)) {
+    maximum = max(1, min(32, limit)); self.limit = maximum
+    self.recoveryInterval = recoveryInterval
+  }
   func acquire(foreground: Bool = true) async throws {
     try Task.checkCancellation()
     if active < limit {
@@ -229,19 +236,27 @@ actor VideoStreamPermits {
     }
   }
   func statistics() -> [String: Int] {
-    ["peakVideoRequests": peak, "videoBlocks": blocks, "effectiveConnections": limit, "retriedBlocks": retries]
+    ["peakVideoRequests": peak, "videoBlocks": blocks, "effectiveConnections": limit, "configuredConnections": maximum, "activeVideoRequests": active, "queuedVideoRequests": waiters.count, "retriedBlocks": retries]
   }
   func backOff() {
-    retries += 1
+    retries += 1; successfulBlocks = 0; lastFailure = .now
     if lastReduction == nil || lastReduction!.duration(to: .now) >= .seconds(2) {
-      limit = max(1, min(4, limit / 2)); lastReduction = .now
+      limit = max(1, limit / 2); lastReduction = .now
     }
   }
-  func release() {
+  func release(succeeded: Bool = false) {
+    if succeeded {
+      successfulBlocks += 1
+      if limit < maximum, successfulBlocks >= limit,
+        lastFailure == nil || lastFailure!.duration(to: .now) >= recoveryInterval {
+        limit += 1; successfulBlocks = 0
+      }
+    }
     active -= 1
     while active < limit && !waiters.isEmpty {
       active += 1
       blocks += 1
+      peak = max(peak, active)
       waiters.removeFirst().1.resume()
     }
   }

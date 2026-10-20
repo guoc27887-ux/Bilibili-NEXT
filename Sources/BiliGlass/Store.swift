@@ -2,10 +2,12 @@ import CoreImage.CIFilterBuiltins
 import SwiftUI
 
 struct HistoryEntry: Codable, Identifiable {
-  var id: String { video.bvid }
+  var id: String { "\(accountID ?? "legacy"):\(video.bvid)" }
   var video: Video
   var positions: [String: Double]
   var date: Date
+  var lastCID: Int?
+  var accountID: String?
 }
 enum Destination: String, CaseIterable, Identifiable {
   case recommend = "推荐"
@@ -51,6 +53,7 @@ private struct FeedSnapshot: Codable {
   let videoActions = VideoActionsModel()
   let inbox = InboxModel()
   let accountHistory = AccountHistory()
+  let historySync = WatchHistorySync()
   var danmaku = DanmakuController()
   var navigationRevision = 0
   var profileTarget: ProfileTarget?
@@ -89,8 +92,8 @@ private struct FeedSnapshot: Codable {
     if let data = UserDefaults.standard.data(forKey: "history") {
       history = (try? JSONDecoder().decode([HistoryEntry].self, from: data)) ?? []
     }
-    playback.onProgress = { [weak self] bvid, cid, seconds in
-      self?.saveProgress(bvid, cid: cid, seconds: seconds)
+    playback.onProgress = { [weak self] bvid, cid, seconds, final in
+      self?.saveProgress(bvid, cid: cid, seconds: seconds, final: final)
     }
   }
   func start() async {
@@ -237,24 +240,31 @@ private struct FeedSnapshot: Codable {
     videoActions.clear(); navigationRevision += 1; profileTarget = nil
     comments.stop(); danmaku.stop(); showPlayer = true; playerFocus += 1
     playback.focusPlayer()
-    playback.open(entry.video.bvid, api: api, initialCID: entry.cid) { cid in
-      cid == entry.cid ? Double(max(0, entry.progress)) : 0
+    playback.open(entry.video.bvid, api: api, initialCID: entry.cid) { [weak self] cid in
+      if entry.isLocal && entry.cid == 0 { return self?.position(entry.video.bvid, cid: cid) ?? 0 }
+      return cid == entry.cid ? Double(max(0, entry.progress)) : 0
     }
   }
   func position(_ bvid: String, cid: Int) -> Double {
-    history.first { $0.video.bvid == bvid }?.positions["\(cid)"] ?? 0
+    history.first { $0.video.bvid == bvid && ($0.accountID == feedOwner || $0.accountID == nil) }?.positions["\(cid)"] ?? 0
   }
-  func saveProgress(_ bvid: String, cid: Int, seconds: Double) {
-    guard let video = playback.detail?.video, video.bvid == bvid, seconds > 0 else { return }
+  func saveProgress(_ bvid: String, cid: Int, seconds: Double, final: Bool = false) {
+    guard let detail = playback.detail, detail.video.bvid == bvid, cid > 0,
+      seconds.isFinite, seconds > 0 else { return }
+    let video = detail.video
     var entry =
-      history.first { $0.video.bvid == bvid }
+      history.first { $0.video.bvid == bvid && ($0.accountID == feedOwner || $0.accountID == nil) }
       ?? HistoryEntry(video: video, positions: [:], date: Date())
+    entry.video = video
     entry.positions["\(cid)"] = seconds
     entry.date = Date()
-    history.removeAll { $0.video.bvid == bvid }
+    entry.lastCID = cid
+    entry.accountID = feedOwner
+    history.removeAll { $0.video.bvid == bvid && ($0.accountID == feedOwner || $0.accountID == nil) }
     history.insert(entry, at: 0)
     history = Array(history.prefix(200))
     persistHistory()
+    historySync.record(api: api, aid: detail.aid, bvid: bvid, cid: cid, seconds: seconds, final: final)
   }
   func persistHistory() {
     if let d = try? JSONEncoder().encode(history) {
@@ -381,6 +391,7 @@ private struct FeedSnapshot: Codable {
     inbox.clear()
     accountHistory.reset()
     playback.stop()
+    historySync.reset()
     showPlayer = false
     navigationRevision += 1
     profileTarget = nil

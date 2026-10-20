@@ -71,12 +71,12 @@ extension API {
         "\($0.key.addingPercentEncoding(withAllowedCharacters: allowed)!)=\($0.value.addingPercentEncoding(withAllowedCharacters: allowed)!)"
       }.joined(separator: "&").utf8)
   }
-  func post(_ path: String, _ values: [String: String]) async throws -> [String: Any] {
+  func post(_ path: String, _ values: [String: String], videoBVID: String? = nil) async throws -> [String: Any] {
     try Task.checkCancellation()
     let allowed = [
       "/x/v2/reply/add", "/x/v2/reply/action", "/x/v2/reply/del", "/x/v2/dm/post",
-      "/x/web-interface/archive/like", "/x/web-interface/coin/add", "/x/v3/fav/resource/deal",
-      "/x/v2/history/toview/add", "/x/v2/history/toview/del", "/x/relation/modify",
+      "/x/web-interface/archive/like", "/x/web-interface/archive/like/triple", "/x/web-interface/coin/add", "/x/v3/fav/resource/deal",
+      "/x/v2/history/toview/add", "/x/v2/history/toview/del", "/x/v2/history/report", "/x/relation/modify",
       "/x/v3/fav/folder/add",
     ]
     guard allowed.contains(path), signedIn, let csrf = cookies["bili_jct"] else {
@@ -92,6 +92,10 @@ extension API {
     req.setValue(
       cookies.map { "\($0.key)=\($0.value)" }.joined(separator: "; "), forHTTPHeaderField: "Cookie")
     Self.mediaHeaders.forEach { req.setValue($1, forHTTPHeaderField: $0) }
+    req.setValue("https://www.bilibili.com", forHTTPHeaderField: "Origin")
+    if let videoBVID, videoID(videoBVID) == videoBVID {
+      req.setValue("https://www.bilibili.com/video/\(videoBVID)/", forHTTPHeaderField: "Referer")
+    }
     let (data, r) = try await session.data(for: req)
     guard (r as? HTTPURLResponse)?.statusCode == 200,
       let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]

@@ -30,7 +30,8 @@ import AVKit
     return responder is NSTextView || responder is NSTextField
   }
   private func handle(_ event: NSEvent) -> NSEvent? {
-    guard let view, let playback, event.window === view.window, view.window?.isKeyWindow == true,
+    guard let view, let playback, playback.nativeView === view, view.player === playback.player,
+          event.window === view.window, view.window?.isKeyWindow == true,
           !view.isHidden, playback.player.currentItem != nil else { return event }
     if event.type == .keyUp, event.keyCode == 124, rightDown {
       let wasBoosted = boosted
@@ -52,7 +53,8 @@ import AVKit
       rightDown = true
       holdTask = Task { [weak self] in
         do { try await Task.sleep(for: .milliseconds(300)) } catch { return }
-        guard let self, self.rightDown, !self.editingText, self.view?.window?.isKeyWindow == true else { return }
+        guard let self, self.rightDown, !self.editingText, let view = self.view,
+          self.playback?.nativeView === view, !view.isHidden, view.window?.isKeyWindow == true else { return }
         self.boosted = self.playback?.beginTemporarySpeed() ?? false
       }
       return nil
@@ -60,9 +62,12 @@ import AVKit
     }
   }
   func cancelHeldKey() {
+    let ownedBoost = boosted
     holdTask?.cancel(); holdTask = nil
     rightDown = false; boosted = false
-    playback?.endTemporarySpeed()
+    // Inline and fullscreen views coexist. Updating the inactive view must not
+    // release the temporary speed owned by the fullscreen keyboard.
+    if ownedBoost { playback?.endTemporarySpeed() }
   }
   func stop() {
     cancelHeldKey()

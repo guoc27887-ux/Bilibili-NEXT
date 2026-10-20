@@ -40,6 +40,98 @@ private final class PendingProtocol: URLProtocol, @unchecked Sendable {
 }
 
 @Suite(.serialized) struct RefinementTests {
+  private func historyVideo(_ bvid: String = "BV16v411e7CW") -> Video {
+    Video(bvid: bvid, title: "fixture", cover: "", author: "", duration: 100, views: 0)
+  }
+  @Test func mergedHistoryKeepsLatestEpisodeAndSeparatesAccounts() throws {
+    let video = historyVideo()
+    let remote = AccountHistoryEntry(video: video, cid: 1, progress: 15,
+      viewedAt: Date(timeIntervalSince1970: 100), part: "P1")
+    let local = HistoryEntry(video: video, positions: ["1": 15, "2": 40],
+      date: Date(timeIntervalSince1970: 110), lastCID: 2, accountID: "123")
+    let other = HistoryEntry(video: historyVideo("BV1xx411c7mD"), positions: ["3": 60],
+      date: Date(timeIntervalSince1970: 120), lastCID: 3, accountID: "456")
+    let merged = AccountHistoryEntry.merged(remote: [remote], local: [local, other], accountID: "123")
+    #expect(merged.count == 1)
+    #expect(merged.first?.cid == 2 && merged.first?.progress == 40 && merged.first?.isLocal == true)
+    let newer = AccountHistoryEntry(video: video, cid: 1, progress: 50,
+      viewedAt: Date(timeIntervalSince1970: 130), part: "P1")
+    #expect(AccountHistoryEntry.merged(remote: [remote, newer], local: [local], accountID: "123").first?.progress == 50)
+  }
+  @Test func legacyHistoryDecodesWithoutInventingLatestEpisode() throws {
+    let entry = HistoryEntry(video: historyVideo(), positions: ["11": 10, "22": 20], date: Date())
+    var json = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(entry)) as? [String: Any])
+    json.removeValue(forKey: "lastCID"); json.removeValue(forKey: "accountID")
+    let legacy = try JSONDecoder().decode(HistoryEntry.self, from: JSONSerialization.data(withJSONObject: json))
+    #expect(legacy.accountID == nil)
+    #expect(AccountHistoryEntry.merged(remote: [], local: [legacy], accountID: "123").first?.cid == 0)
+    var single = legacy; single.positions = ["22": 20]
+    #expect(AccountHistoryEntry.merged(remote: [], local: [single], accountID: "123").first?.cid == 22)
+  }
+  private func requestBody(_ request: URLRequest) -> String {
+    if let data = request.httpBody { return String(decoding: data, as: UTF8.self) }
+    guard let stream = request.httpBodyStream else { return "" }
+    stream.open(); defer { stream.close() }
+    var data = Data(), bytes = [UInt8](repeating: 0, count: 1024)
+    while true {
+      let count = stream.read(&bytes, maxLength: bytes.count)
+      if count <= 0 { break }
+      data.append(contentsOf: bytes.prefix(count))
+    }
+    return String(decoding: data, as: UTF8.self)
+  }
+  @MainActor private func waitForSync(_ sync: WatchHistorySync) async throws {
+    for _ in 0..<1000 where sync.syncing { try await Task.sleep(for: .milliseconds(2)) }
+    #expect(!sync.syncing)
+  }
+  @Test @MainActor func viewingSyncThrottlesAndFlushesLatestPositionInOrder() async throws {
+    let api = api(), sync = WatchHistorySync(enabled: { true })
+    let now = Date(timeIntervalSince1970: 100)
+    sync.record(api: api, aid: 123, bvid: "BV16v411e7CW", cid: 55, seconds: 5, now: now)
+    let first = try await nextRequest()
+    #expect(first.request.httpMethod == "POST")
+    #expect(first.request.url?.path == "/x/v2/history/report")
+    #expect(first.request.value(forHTTPHeaderField: "Referer") == "https://www.bilibili.com/video/BV16v411e7CW/")
+    #expect(requestBody(first.request) == "aid=123&cid=55&csrf=fixture&progress=5")
+    sync.record(api: api, aid: 123, bvid: "BV16v411e7CW", cid: 55, seconds: 10, now: now.addingTimeInterval(5))
+    sync.record(api: api, aid: 123, bvid: "BV16v411e7CW", cid: 55, seconds: 12, final: true, now: now.addingTimeInterval(7))
+    sync.record(api: api, aid: 123, bvid: "BV16v411e7CW", cid: 55, seconds: 15, final: true, now: now.addingTimeInterval(8))
+    #expect(PendingProtocol.pending.isEmpty)
+    first.finish()
+    let last = try await nextRequest()
+    #expect(requestBody(last.request).contains("progress=15"))
+    last.finish()
+    try await waitForSync(sync)
+    sync.record(api: api, aid: 123, bvid: "BV16v411e7CW", cid: 55, seconds: 15, final: true)
+    #expect(!sync.syncing && PendingProtocol.pending.isEmpty)
+  }
+  @Test @MainActor func viewingSyncFailureCanRecoverAndDisabledSyncNeverWrites() async throws {
+    let api = api(), sync = WatchHistorySync(enabled: { true })
+    let now = Date()
+    sync.record(api: api, aid: 123, bvid: "BV16v411e7CW", cid: 55, seconds: 5, now: now)
+    let first = try await nextRequest()
+    first.finish(#"{"code":-500,"message":"fixture unavailable"}"#)
+    try await waitForSync(sync)
+    #expect(sync.error != nil)
+    sync.record(api: api, aid: 123, bvid: "BV16v411e7CW", cid: 55, seconds: 40, now: now.addingTimeInterval(35))
+    let retry = try await nextRequest(); retry.finish()
+    try await waitForSync(sync)
+    #expect(sync.error == nil)
+    let disabled = WatchHistorySync(enabled: { false })
+    disabled.record(api: api, aid: 123, bvid: "BV16v411e7CW", cid: 55, seconds: 50)
+    #expect(!disabled.syncing && PendingProtocol.pending.isEmpty)
+  }
+  @Test @MainActor func accountChangeDoesNotSendQueuedViewingProgress() async throws {
+    let api = api(), sync = WatchHistorySync(enabled: { true })
+    sync.record(api: api, aid: 123, bvid: "BV16v411e7CW", cid: 55, seconds: 5)
+    let first = try await nextRequest()
+    sync.record(api: api, aid: 123, bvid: "BV16v411e7CW", cid: 55, seconds: 10, final: true)
+    api.authenticationGeneration = UUID()
+    first.finish()
+    try await waitForSync(sync)
+    #expect(PendingProtocol.pending.isEmpty && sync.error == nil)
+    sync.reset()
+  }
   @Test func commentLinksUseNativeVideoTargetsAndDropTracking() {
     let links = CommentVideoLink.parse(message:
       "分享 https://b23.tv/abc?spm_id=123 https://b23.tv/abc https://www.bilibili.com/video/av123。 https://evil.example/video/BV16v411e7CW",

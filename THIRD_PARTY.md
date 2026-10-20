@@ -18,6 +18,8 @@ References consulted, no code copied:
 - DanmakuFlameMaster mode 7 data format reference (no implementation copied): https://github.com/bilibili/DanmakuFlameMaster
 - Apple Liquid Glass: https://developer.apple.com/documentation/SwiftUI/Applying-Liquid-Glass-to-custom-views
 - Account video-history cursor schema: https://github.com/bilibili-plugins/bilibili-api-collect/blob/master/docs/historytoview/history.md — independently implemented native paging, source selection and playback resume.
+- Viewing-progress report schema: https://github.com/pskdje/bilibili-API-collect/blob/main/docs/video/report.md — independently implemented throttled progress sync; old device history is not replayed.
+- Official Bilibili video page interaction behavior: https://www.bilibili.com/ — inspected the public player bundle for the unified archive relation endpoint and one-click triple response fields; no site JavaScript or account data bundled.
 - AVPlayer fast-forward behavior and I-frame fallback: https://developer.apple.com/library/archive/qa/qa1772/_index.html
 
 This is an unofficial client. Bilibili names, videos, thumbnails and account data belong to their respective owners.

@@ -92,6 +92,9 @@ struct RootView: View {
       store.comments.stop()
       store.downloads.persist()
     }
+    .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+      store.playback.saveCurrentProgress()
+    }
     .onChange(of: store.searchFocus) { searchFocused = true }
     .onChange(of: store.playerFocus) { searchFocused = false; store.playback.focusPlayer() }
     .onChange(of: store.navigationRevision) {
@@ -141,7 +144,7 @@ struct RootView: View {
             store.destination == d && !store.showPlayer ? biliPink.opacity(0.19) : .clear,
             in: .rect(cornerRadius: 12)
           )
-          .foregroundStyle(store.destination == d && !store.showPlayer ? biliPink : .primary)
+          .foregroundStyle(.primary)
         }.buttonStyle(.plain)
       }
     }.padding(12).floatingGlass(24)
@@ -242,7 +245,7 @@ struct RootView: View {
             Text("登录")
             Spacer()
             Image(systemName: "qrcode").foregroundStyle(.secondary)
-          }.padding(10)
+          }.padding(10).frame(maxWidth: .infinity).contentShape(.rect(cornerRadius: 20))
         }.buttonStyle(.plain)
       }
     }.frame(maxWidth: .infinity).frame(height: 58).floatingGlass(20)
@@ -415,16 +418,16 @@ struct PlayerPage: View {
                 }
               }
             } label: {
-              Label(s.names[p.selectedQuality] ?? "清晰度", systemImage: "slider.horizontal.3")
-            }
+              Label(s.names[p.selectedQuality] ?? "清晰度", systemImage: "slider.horizontal.3").foregroundStyle(.primary)
+            }.tint(.primary)
           }
           Menu {
             ForEach([0.5, 0.75, 1, 1.25, 1.5, 2], id: \.self) { rate in
               Button("\(rate.formatted())×") { p.setSpeed(Float(rate)) }
             }
           } label: {
-            Text("\(Double(p.speed).formatted())×")
-          }
+            Text("\(Double(p.speed).formatted())×").foregroundStyle(.primary)
+          }.tint(.primary)
           if !p.actualSize.isEmpty {
             Text(p.actualSize + (p.sourceFormat.isEmpty ? "" : " · " + p.sourceFormat)).help(
               p.decodedFormat
@@ -452,8 +455,8 @@ struct PlayerPage: View {
                 }
               }
             } label: {
-              Label("下载", systemImage: "arrow.down")
-            }.disabled(p.loading)
+              Label("下载", systemImage: "arrow.down").foregroundStyle(.primary)
+            }.tint(.primary).disabled(p.loading)
           }
         }.buttonStyle(.glass).controlSize(.regular)
         if let d = p.detail {

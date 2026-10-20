@@ -64,7 +64,9 @@ struct PlaybackDetails: View {
               row("视频下载速度", speed(network["videoBytesPerSecond"] ?? 0))
               row("音频下载速度", speed(network["audioBytesPerSecond"] ?? 0))
               row("前向缓冲", String(format: "%.1f 秒", bufferedSeconds))
-              row("并发上限 / 峰值", "\(concurrency["effectiveConnections"] ?? 0) / \(concurrency["peakVideoRequests"] ?? 0)")
+              row("并发 · 当前 / 上限", "\(concurrency["activeVideoRequests"] ?? 0) / \(concurrency["effectiveConnections"] ?? 0)")
+              row("设置上限 / 峰值", "\(concurrency["configuredConnections"] ?? 0) / \(concurrency["peakVideoRequests"] ?? 0)")
+              row("视频线路切换", "\(playback.routeDiagnostics["videoSwitches"] ?? "0") 次")
               if let cached = concurrency["diskCacheBytes"] {
                 row("临时磁盘缓存", ByteCountFormatter.string(fromByteCount: Int64(cached), countStyle: .file))
                 row("预读状态", concurrency["diskCacheLimited"] == 1 ? "空间上限 · 按需播放" : concurrency["diskCacheComplete"] == 1 ? "已缓存到片尾" : "继续预读中")
