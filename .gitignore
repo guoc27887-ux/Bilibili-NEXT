@@ -7,3 +7,11 @@
 *.xcresult/
 *.trace/
 local.BiliGlass.thumbnails/
+outputs/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.ipa
+*.xcarchive/
+*.mobileprovision
+*.p12

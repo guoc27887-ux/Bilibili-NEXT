@@ -28,7 +28,7 @@ final class LoudnessProcessingTap: @unchecked Sendable {
         self.tap = tap
     }
 
-    @available(macOS 27.0, *)
+    @available(macOS 27.0, iOS 27.0, *)
     static func make(initialGain: Float) -> LoudnessProcessingTap? {
         guard initialGain.isFinite, initialGain > 0,
             let processingFormat = processingFormat()
@@ -71,7 +71,7 @@ final class LoudnessProcessingTap: @unchecked Sendable {
         return LoudnessProcessingTap(state: state, tap: createdTap)
     }
 
-    @available(macOS 27.0, *)
+    @available(macOS 27.0, iOS 27.0, *)
     func makeAudioMix() -> AVAudioMix {
         let parameters = AVMutableAudioMixInputParameters()
         parameters.trackID = AVAudioMixInputParametersTrackID.mixID.rawValue

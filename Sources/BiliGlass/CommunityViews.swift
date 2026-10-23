@@ -48,10 +48,17 @@ struct CommentsView: View {
         }.buttonStyle(.glassProminent).disabled(
           comments.sending
             || (store.account != nil
-              && comments.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+              && comments.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && comments.attachments.isEmpty)
         )
       }
       if comments.draft.count > 1000 { Text("评论最多 1000 字").foregroundStyle(.red).font(.caption) }
+      HStack {
+        EmojiPicker(api: store.api) { comments.draft += $0.token }
+        Button { comments.attachments += ImageAttachment.choose(multiple: true).prefix(max(0, 9 - comments.attachments.count)) } label: { Label("添加图片", systemImage: "photo.badge.plus") }.buttonStyle(.glass).disabled(comments.attachments.count >= 9)
+        Spacer()
+      }.disabled(store.account == nil || comments.sending)
+      if !comments.attachments.isEmpty { AttachedImages(urls: $comments.attachments).disabled(comments.sending) }
+
       if let submitted = comments.submittedText, let status = comments.submissionStatus {
         HStack(alignment: .top, spacing: 12) {
           Image(systemName: "paperplane").foregroundStyle(biliPink)

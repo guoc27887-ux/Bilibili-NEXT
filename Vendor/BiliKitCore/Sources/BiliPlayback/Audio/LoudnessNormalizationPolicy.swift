@@ -18,7 +18,7 @@ public struct LoudnessNormalizationPolicy: Sendable {
 
     /// 官方支持对 HLS 混音挂 `MTAudioProcessingTap` 的系统版本起才提供这项功能。
     public static var isSupported: Bool {
-        if #available(macOS 27.0, *) { true } else { false }
+        if #available(macOS 27.0, iOS 27.0, *) { true } else { false }
     }
 
     public init() {}

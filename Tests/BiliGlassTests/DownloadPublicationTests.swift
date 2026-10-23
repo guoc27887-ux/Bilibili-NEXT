@@ -4,6 +4,24 @@ import Testing
 @testable import BiliGlass
 
 @Suite(.serialized) struct DownloadPublicationTests {
+  @Test func relocatingAnIOSContainerKeepsCachedMediaSidecarsAndPausedTasks() {
+    let video = Video(bvid: "fixture", title: "test", cover: "", author: "", duration: 10, views: 0)
+    let cached = SavedDownload(id: UUID(), video: video, cid: 1, quality: "1080P",
+      path: "/old/MediaCache/video.mp4", date: .now, cached: true,
+      danmakuPath: "/old/MediaCache/video.danmaku.json")
+    let exported = SavedDownload(id: UUID(), video: video, cid: 2, quality: "1080P",
+      path: "/exports/video.mp4", date: .now, cached: false)
+    let job = PendingDownload(id: UUID(), video: video, cid: 1, qn: 80,
+      folder: "/old/MediaCache", cached: true, progress: 0.5)
+    let moved = DownloadIndex(saved: [cached, exported], jobs: [job])
+      .relocatingCache(to: URL(fileURLWithPath: "/new/MediaCache"))
+    #expect(moved.saved[0].path == "/new/MediaCache/video.mp4")
+    #expect(moved.saved[0].danmakuPath == "/new/MediaCache/video.danmaku.json")
+    #expect(moved.saved[0].id == cached.id)
+    #expect(moved.saved[1].path == exported.path)
+    #expect(moved.jobs[0].folder == "/new/MediaCache")
+    #expect(moved.jobs[0].id == job.id && moved.jobs[0].progress == 0.5)
+  }
   private func folder() throws -> URL {
     let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
     try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)

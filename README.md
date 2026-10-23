@@ -1,8 +1,8 @@
 # Bilibili NEXT
 
-<img src="Assets/Bilibili-NEXT-icon.png" width="128" alt="Bilibili NEXT icon">
+<img src="Assets/Bilibili-NEXT-macOS.svg" width="128" alt="Bilibili NEXT icon">
 
-macOS 26+ 的非官方哔哩哔哩客户端，主要使用 SwiftUI、Liquid Glass 和 AVPlayer。当前版本 1.0.2，构建为 Apple silicon。
+面向 macOS 26+、iOS / iPadOS 26+ 的非官方哔哩哔哩客户端，主要使用 SwiftUI、Liquid Glass 和 AVPlayer。macOS 已发布版本为 1.0.2（Apple silicon）；iOS 当前为 0.1.0 开发预览，源码与构建方法见下方。
 
 从 [GitHub Releases](https://github.com/wzk112/Bilibili-NEXT/releases/latest) 下载 Apple silicon 发布包，解压后将 `Bilibili NEXT.app` 放入应用程序目录。扫码登录后，登录信息保存在 macOS 钥匙串。开发构建使用本机已有的 Apple Development 签名；从早期临时签名版本迁移时，系统可能要求重新授权一次。
 
@@ -10,8 +10,13 @@ macOS 26+ 的非官方哔哩哔哩客户端，主要使用 SwiftUI、Liquid Glas
 
 ## 使用
 
+本地开发版新增：31 个视频主分区；播放页相关推荐、标签、合集与列表队列、自动下一集、循环、字幕、章节和进度缩略图；视频与用户搜索、排序、时长与日期筛选、搜索历史和联想；收藏夹编辑与批量管理、稍后再看移除与已看完清理；动态点赞、转发与图文发布；评论图片、表情选择；私信表情、图片发送和两分钟内撤回；弹幕列表、历史与云端屏蔽规则、可选的本机人物防挡；推荐反馈、举报与黑名单。实际可用内容取决于视频、登录权限和官方接口。画中画入口显示系统 AVPlayer 控件，再使用系统画中画按钮。
+
+私信使用每个会话独立的滚动位置，加载历史时保持当前阅读位置；会话分页使用服务端最后一条记录的时间戳，重复分页或网络失败会显示提示。人物防挡默认关闭，使用本机 Vision 分割，开启时会增加播放处理开销；与网页端算法不完全相同。表情图片目前显示静态帧。分区沿用当前网页公开的主分区，未启用的子分类不显示。
+
 - 搜索关键词、BV 号或视频链接；支持推荐、热门、关注视频动态。
 - 播放页可切换分集、清晰度、速度，提供常驻原生进度、暂停、音量控制，全屏沿用当前窗口和播放器；双击画面或按 ⌃⌘F 切换全屏，Esc 退出。播放器区域的鼠标滚轮交给页面滚动，避免误触进度。
+- 播放时切换页面，右下角出现 Liquid Glass 迷你播放器，视频继续播放。可暂停/继续、返回播放页或关闭；返回保留当前进度，关闭才停止播放。
 - 空格暂停/继续，左右方向键单击跳转 5 秒，按住右方向键临时加速，松开恢复原速；支持快速播放的本地媒体使用 3×，在线 HLS 使用 2× 并明确提示，避免系统退化为关键帧快进而卡住音画；输入文字时不接管这些按键。
 - 播放页显示视频发布时间。打开视频后焦点转入播放器，避免搜索框截走快捷键；主动编辑文字时保留输入行为。
 - 自动恢复各分集的观看位置；接近片尾的记录重新打开时从头播放，避免从最后一个媒体片段起播。
@@ -43,7 +48,7 @@ macOS 26+ 的非官方哔哩哔哩客户端，主要使用 SwiftUI、Liquid Glas
 - 返回推荐/热门时复用近期列表；手动刷新保留原内容直到新内容返回。启动复用当前账号的首页快照，再获取新推荐；封面保留有容量上限的解码缓存。
 - 官方验证码在独立验证面板中打开，只有这一类验证流程使用 WebKit；需要用户本人完成。面板复用本应用登录，不读取 Edge 的登录凭据。
 
-新观看进度按约 30 秒限频同步，暂停或离开播放页时提交当前位置；退出进程前保存本机进度，不保证退出时网络请求已完成。旧版本积累的本机记录会合并显示，不批量上传。同步失败时保留本机记录。私信目前支持文字发送，接收图片与视频分享，会话自动更新、手动刷新与分页；尚未实现文件上传、消息撤回等全部网站操作。暂未覆盖网页端所有功能。
+新观看进度按约 30 秒限频同步，暂停或离开播放页时提交当前位置；退出进程前保存本机进度，不保证退出时网络请求已完成。旧版本积累的本机记录会合并显示，不批量上传。同步失败时保留本机记录。图片支持 JPEG、PNG、WebP、GIF，单张最大 10 MB。动态与消息发送失败保留草稿；网络结果不确定时应先刷新确认，应用不自动重发。番剧、直播和创作中心仍在浏览器打开，暂未覆盖网页端所有服务。
 
 ## 构建
 
@@ -69,4 +74,20 @@ Scripts/build-app.sh
 
 项目代码采用 [MIT License](LICENSE)。内含 BiliKit-Mac 的 MIT 播放组件，保留原作者许可；下载恢复参考 Bilibili-thread-ripper，另参考 IINA、BAS 和社区 API 文档。完整来源、版本与本地改动见 [THIRD_PARTY.md](THIRD_PARTY.md)。本项目与哔哩哔哩官方无隶属关系，媒体和商标归各自权利人所有。
 
-图标为独立生成的媒体图形，[原图与提示词](Assets/ICON.md) 随源码提供。具体测试和未覆盖功能见 [QA.md](QA.md)，版本说明见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+两端采用统一的扁平化 SVG 图标，[矢量源文件与资源生成方法](Assets/ICON.md) 随源码提供。具体测试和未覆盖功能见 [QA.md](QA.md)，版本说明见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
+
+## iOS 开发预览
+
+<img src="Assets/Bilibili-NEXT-iOS.svg" width="112" alt="Bilibili NEXT iOS icon">
+
+已有独立的原生 iOS Xcode 工程：[Apps/iOS/BilibiliNEXT.xcodeproj](Apps/iOS/BilibiliNEXT.xcodeproj)。当前实现、真机验证和待迁移功能见 [IOS_STATUS.md](IOS_STATUS.md)；完整目标范围见 [IOS_APP_PLAN.md](IOS_APP_PLAN.md)。
+
+请克隆整个仓库：iOS 工程直接引用 `Sources/BiliGlass` 的共享源码和 `Vendor/BiliKitCore` 本地依赖，单独下载 `Apps/iOS` 无法构建。当前源码已使用 iOS 27 SDK 的可用性声明，构建需 Xcode 27+，部署目标仍为 iOS 26。模拟器构建无需签名；真机使用你自己的 Apple 开发者团队。
+
+```sh
+Scripts/build-ios.sh
+# 真机：填写自己的签名团队和连接设备 UDID
+IOS_PLATFORM=device DEVELOPMENT_TEAM=YOUR_TEAM IOS_DEVICE_ID=YOUR_UDID Scripts/build-ios.sh
+```
+
+也可在 Xcode 打开工程，选择 `BilibiliNEXT` Scheme。工程可通过 `python3 Scripts/generate-ios-project.py` 重新生成。当前没有 TestFlight / App Store 版本；已发布的 macOS 安装包不会随源码更新自动替换。

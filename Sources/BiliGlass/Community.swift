@@ -60,10 +60,12 @@ struct FavoriteFolder: Identifiable, Hashable {
   let count: Int
   var containsVideo = false
   var isPrivate = false
+  // attr bit 0 is privacy; bit 1 identifies a non-default folder.
+  static func privacyIsPrivate(_ attributes: Int) -> Bool { attributes & 1 != 0 }
 }
 
 extension API {
-  static func formBody(_ values: [String: String]) -> Data {
+  nonisolated static func formBody(_ values: [String: String]) -> Data {
     let allowed = CharacterSet(
       charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
     return Data(
@@ -78,13 +80,26 @@ extension API {
       "/x/web-interface/archive/like", "/x/web-interface/archive/like/triple", "/x/web-interface/coin/add", "/x/v3/fav/resource/deal",
       "/x/v2/history/toview/add", "/x/v2/history/toview/del", "/x/v2/history/report", "/x/relation/modify",
       "/x/v3/fav/folder/add",
+      "/x/v3/fav/folder/edit", "/x/v3/fav/folder/del",
+      "/x/web-interface/feedback/dislike", "/x/web-interface/feedback/dislike/cancel", "/x/web-interface/appeal/v2/submit",
+      "/x/dm/filter/user/add", "/x/dm/filter/user/del", "/x/dm/report/add",
     ]
     guard allowed.contains(path), signedIn, let csrf = cookies["bili_jct"] else {
       throw BiliError(text: "请先登录")
     }
+    let auth = authenticationGeneration
     var body = values
     body["csrf"] = csrf
-    var req = URLRequest(url: URL(string: "https://api.bilibili.com" + path)!)
+    let originalBody = body
+    var url = URLComponents(string: "https://api.bilibili.com" + path)!
+    if let grant = consumeVerification(path: path, body: body) {
+      url.queryItems = [URLQueryItem(name: "gaia_vtoken", value: grant.token)]
+      if grant.challenge.code == -401 {
+        url.queryItems?.append(URLQueryItem(name: "token", value: grant.token))
+        body["tk"] = grant.token
+      }
+    }
+    var req = URLRequest(url: url.url!)
     req.httpMethod = "POST"
     req.httpBody = Self.formBody(body)
     req.setValue(
@@ -97,18 +112,23 @@ extension API {
       req.setValue("https://www.bilibili.com/video/\(videoBVID)/", forHTTPHeaderField: "Referer")
     }
     let (data, r) = try await session.data(for: req)
+    try Task.checkCancellation()
+    guard auth == authenticationGeneration else { throw CancellationError() }
     guard (r as? HTTPURLResponse)?.statusCode == 200,
       let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
     else { throw BiliError(text: "发送失败，请稍后重试") }
     guard root["code"] as? Int == 0 else {
-      throw BiliError(text: root["message"] as? String ?? "操作失败", code: root["code"] as? Int)
+      let challenge = (r as? HTTPURLResponse).flatMap {
+        InteractionChallenge.parse(root, response: $0, path: path, body: originalBody, authentication: auth)
+      }
+      throw BiliError(text: root["message"] as? String ?? "操作失败", code: root["code"] as? Int, challenge: challenge)
     }
     let d = root["data"] as? [String: Any] ?? [:]
     if d["need_captcha"] as? Bool == true { throw BiliError(text: "需要完成官方验证", code: -352) }
     return d
   }
   func binary(_ path: String, _ query: [String: String]) async throws -> Data {
-    guard ["/x/v2/dm/web/seg.so", "/x/v2/dm/web/view"].contains(path) else {
+    guard ["/x/v2/dm/web/seg.so", "/x/v2/dm/web/view", "/x/v2/dm/web/history/seg.so"].contains(path) else {
       throw BiliError(text: "请求无效")
     }
     var u = URLComponents(string: "https://api.bilibili.com" + path)!
@@ -160,13 +180,13 @@ extension API {
       return FavoriteFolder(
         id: id, title: j["title"] as? String ?? "收藏夹", count: j["media_count"] as? Int ?? 0,
         containsVideo: (j["fav_state"] as? Int ?? 0) == 1,
-        isPrivate: (j["attr"] as? Int ?? 0) & 2 != 0)
+        isPrivate: FavoriteFolder.privacyIsPrivate(j["attr"] as? Int ?? 0))
     }
   }
-  func favorites(_ folder: Int, page: Int) async throws -> [Video] {
+  func favorites(_ folder: Int, page: Int, keyword: String = "") async throws -> [Video] {
     let d = try await request(
       "/x/v3/fav/resource/list",
-      ["media_id": "\(folder)", "pn": "\(page)", "ps": "20", "order": "mtime", "platform": "web"])
+      ["media_id": "\(folder)", "pn": "\(page)", "ps": "20", "order": "mtime", "platform": "web", "keyword": keyword])
     return (d["medias"] as? [[String: Any]] ?? []).compactMap {
       var j = $0
       j["pic"] = j["cover"]
@@ -205,6 +225,7 @@ extension API {
 @MainActor @Observable final class Comments {
   var items: [Reply] = []
   var count = 0
+  private(set) var hasLoadedCount = false
   var loading = false
   var error: String?
   var resourceType = 1
@@ -212,11 +233,18 @@ extension API {
   var page = 1
   var hasMore = true
   var draft = ""
+  var attachments: [URL] = []
   var replyingTo: Reply?
   var sending = false
   var sendError: String?
   var submittedText: String?
   var submissionStatus: String?
+  var focusedRoot: Reply?
+  var focusedReplyID: Int?
+  var focusedReplies: [Reply] {
+    guard let root = focusedRoot else { return [] }
+    return (expanded[root.id] ?? root.children).filter { $0.id != focusedReplyID }
+  }
   var expanded: [Int: [Reply]] = [:]
   var childPages: [Int: Int] = [:]
   var childLoading: Set<Int> = []
@@ -279,6 +307,7 @@ extension API {
           throw BiliError(text: "本页没有返回新的评论，请重试或切换排序")
         }
         count = result.count
+        hasLoadedCount = true
         items = more ? items + additions : additions
         if !more {
           expanded = [:]
@@ -296,7 +325,7 @@ extension API {
       }
     }
   }
-  func children(_ reply: Reply, aid: Int, api: API) async {
+  func children(_ reply: Reply, aid: Int, api: API, pageSize: Int = 10) async {
     guard childHasMore[reply.id] != false else { return }
     guard childLoading.insert(reply.id).inserted else { return }
     let token = identity
@@ -309,7 +338,7 @@ extension API {
         "/x/v2/reply/reply",
         [
           "type": String(resourceType), "oid": "\(aid)", "root": "\(reply.id)", "pn": "\(page)",
-          "ps": "10",
+          "ps": String(pageSize),
         ])
       guard token == identity, listToken == listIdentity else { return }
       let replies = (d["replies"] as? [[String: Any]] ?? []).compactMap(Reply.parse)
@@ -318,11 +347,77 @@ extension API {
       expanded[reply.id] = old + Reply.deduplicated(replies, excluding: ids)
       childPages[reply.id] = page
       let total = (d["page"] as? [String: Any])?["count"] as? Int ?? reply.count
-      childHasMore[reply.id] = !replies.isEmpty && page * 10 < total
+      childHasMore[reply.id] = !replies.isEmpty && page * pageSize < total
     } catch {
       if token == identity && listToken == listIdentity && !Task.isCancelled {
         childErrors[reply.id] = error.localizedDescription
       }
+    }
+  }
+  func loadFocused(_ target: NoticeCommentTarget, api: API) async -> Reply? {
+    stop()
+    resourceID = target.oid
+    resourceType = target.type
+    let token = identity
+    loading = true
+    defer { if token == identity { loading = false } }
+    do {
+      let data = try await api.request("/x/v2/reply/wbi/main", [
+        "oid": String(target.oid), "type": String(target.type), "mode": "3",
+        "seek_rpid": String(target.replyID), "pagination_str": try CommentPage.pagination(nil),
+        "web_location": "1315875"
+      ], signed: true)
+      try Task.checkCancellation()
+      guard token == identity else { return nil }
+      var roots = (data["replies"] as? [[String: Any]] ?? []).compactMap(Reply.parse)
+      roots += (data["top_replies"] as? [[String: Any]] ?? []).compactMap(Reply.parse)
+      func find(_ rows: [Reply]) -> Reply? {
+        for row in rows {
+          if row.id == target.replyID { return row }
+          if let child = find(row.children) { return child }
+        }
+        return nil
+      }
+      var focused = find(roots)
+      let rootID = focused.map { $0.root == 0 ? $0.id : $0.root } ?? target.rootID
+      if rootID > 0 {
+        do {
+          let thread = try await api.request("/x/v2/reply/reply", [
+            "oid": String(target.oid), "type": String(target.type), "root": String(rootID),
+            "pn": "1", "ps": "49"
+          ])
+          try Task.checkCancellation()
+          guard token == identity else { return nil }
+          let children = (thread["replies"] as? [[String: Any]] ?? []).compactMap(Reply.parse)
+          focused = focused ?? find(children)
+          if let root = (thread["root"] as? [String: Any]).flatMap(Reply.parse) {
+            focusedRoot = root
+            if focused == nil, root.id == target.replyID { focused = root }
+          }
+          let total = (thread["page"] as? [String: Any])?["count"] as? Int
+            ?? focusedRoot?.count ?? roots.first(where: { $0.id == rootID })?.count ?? children.count
+          focusedRoot = focusedRoot ?? roots.first(where: { $0.id == rootID })
+            ?? Reply.parse(["rpid": rootID, "rcount": total])
+          expanded[rootID] = Reply.deduplicated(children)
+          childPages[rootID] = 1
+          childHasMore[rootID] = !children.isEmpty && children.count < total
+        } catch {
+          try Task.checkCancellation()
+          guard token == identity else { return nil }
+          if focused == nil { throw error }
+          focusedRoot = roots.first(where: { $0.id == rootID }) ?? Reply.parse(["rpid": rootID])
+          childErrors[rootID] = error.localizedDescription
+        }
+      }
+      guard let focused else { throw BiliError(text: "未能定位这条评论，可能已删除或暂不可见。可重试或查看原页面。") }
+      // Keep the exact requested reply visible even if the server omits its parent in the seek response.
+      items = [focused]
+      focusedReplyID = focused.id
+      hasMore = false
+      return focused
+    } catch {
+      if token == identity && !Task.isCancelled { self.error = error.localizedDescription }
+      return nil
     }
   }
   func collapse(_ reply: Reply) {
@@ -332,7 +427,7 @@ extension API {
   }
   func send(aid: Int, api: API) async {
     let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !sending, !text.isEmpty, text.count <= 1000 else { return }
+    guard !sending, (!text.isEmpty || !attachments.isEmpty), text.count <= 1000 else { return }
     let token = identity
     let target = replyingTo
     sending = true
@@ -342,6 +437,12 @@ extension API {
     defer { if token == identity { sending = false } }
     do {
       var body = ["type": String(resourceType), "oid": "\(aid)", "message": text, "plat": "1"]
+      if !attachments.isEmpty {
+        var pictures: [[String: Any]] = []
+        for url in attachments { pictures.append(try await api.uploadImage(url, business: "new_dyn").commentPayload) }
+        guard token == identity else { return }
+        body["pictures"] = String(decoding: try JSONSerialization.data(withJSONObject: pictures), as: UTF8.self)
+      }
       if let target {
         body["root"] = "\(target.root == 0 ? target.id : target.root)"
         body["parent"] = "\(target.id)"
@@ -349,6 +450,7 @@ extension API {
       let result = try await api.post("/x/v2/reply/add", body)
       guard token == identity else { return }
       draft = ""
+      attachments = []
       replyingTo = nil
       submittedText = text
       let toast = result["success_toast"] as? String ?? ""
@@ -417,14 +519,18 @@ extension API {
     childLoading = []
     liking = []
     draft = ""
+    attachments = []
     replyingTo = nil
     error = nil
     sendError = nil
     submittedText = nil
     submissionStatus = nil
+    focusedRoot = nil
+    focusedReplyID = nil
     loading = false
     sending = false
     count = 0
+    hasLoadedCount = false
     page = 1
     hasMore = true
     childErrors = [:]

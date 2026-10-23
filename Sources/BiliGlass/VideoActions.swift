@@ -1,16 +1,77 @@
 import Foundation
 import SwiftUI
 
+/// Keep the server's verification request in memory, scoped to the exact write.
+/// A completed challenge permits one explicit resubmission, never an automatic spend.
+struct InteractionChallenge: Identifiable, Sendable {
+  let id = UUID()
+  let code: Int
+  let payload: Data
+  let path: String
+  let body: [String: String]
+  let authentication: UUID
+
+  static func parse(_ root: [String: Any], response: HTTPURLResponse, path: String,
+                    body: [String: String], authentication: UUID) -> Self? {
+    guard let code = root["code"] as? Int, [-401, -352].contains(code) else { return nil }
+    let data = root["data"] as? [String: Any] ?? [:]
+    let options: [String: Any]
+    if code == -401 {
+      guard let gaia = data["ga_data"] as? [String: Any], !gaia.isEmpty else { return nil }
+      options = gaia
+    } else {
+      let voucher = response.value(forHTTPHeaderField: "x-bili-gaia-vvoucher")
+      let risk = voucher.map { ["v_voucher": $0] } ?? data
+      guard !risk.isEmpty else { return nil }
+      options = ["riskParams": risk]
+    }
+    guard JSONSerialization.isValidJSONObject(options),
+      let payload = try? JSONSerialization.data(withJSONObject: options), payload.count <= 65_536 else { return nil }
+    return Self(code: code, payload: payload, path: path, body: body, authentication: authentication)
+  }
+}
+struct InteractionVerificationGrant {
+  let challenge: InteractionChallenge
+  let token: String
+  let expires: Date
+}
+
+extension API {
+  @discardableResult
+  func acceptVerification(_ token: String, for challenge: InteractionChallenge, now: Date = Date()) -> Bool {
+    guard challenge.authentication == authenticationGeneration,
+      challenge.body["csrf"] == cookies["bili_jct"], signedIn,
+      !token.isEmpty, token.utf8.count <= 16_384 else { return false }
+    interactionVerification = InteractionVerificationGrant(challenge: challenge, token: token,
+      expires: now.addingTimeInterval(120))
+    return true
+  }
+  func consumeVerification(path: String, body: [String: String], now: Date = Date()) -> InteractionVerificationGrant? {
+    guard let grant = interactionVerification else { return nil }
+    guard grant.expires > now, grant.challenge.authentication == authenticationGeneration else {
+      interactionVerification = nil; return nil
+    }
+    guard grant.challenge.path == path, grant.challenge.body == body else { return nil }
+    interactionVerification = nil
+    return grant
+  }
+  static let interactionCookieNames: Set<String> = [
+    "buvid3", "buvid4", "b_nut", "_uuid", "b_lsid", "buvid_fp", "bili_ticket", "bili_ticket_expires",
+  ]
+}
+
 struct VideoCounts: Sendable {
   var likes: Int
   var coins: Int
   var favorites: Int
   var shares: Int
+  var replies: Int?
   init(_ data: [String: Any] = [:]) {
     likes = max(0, data["like"] as? Int ?? 0)
     coins = max(0, data["coin"] as? Int ?? 0)
     favorites = max(0, data["favorite"] as? Int ?? 0)
     shares = max(0, data["share"] as? Int ?? 0)
+    replies = (data["reply"] as? Int).map { max(0, $0) }
   }
 }
 struct VideoRelation: Equatable, Sendable {
@@ -94,6 +155,9 @@ extension API {
   }
   func addVideoCoins(aid: Int, bvid: String? = nil, amount: Int, alsoLike: Bool) async throws -> Bool {
     guard (1...2).contains(amount) else { throw BiliError(text: "请选择 1 或 2 枚硬币") }
+    if let credential = appCoinAuthorization, credential.accountID == Int(cookies["DedeUserID"] ?? "") {
+      return try await addAppCoins(aid: aid, amount: amount, alsoLike: alsoLike, credential: credential)
+    }
     try await prepareVideoInteraction()
     let result = try await post("/x/web-interface/coin/add", ["aid": String(aid), "multiply": String(amount), "select_like": alsoLike ? "1" : "0", "cross_domain": "true"], videoBVID: bvid)
     return result["like"] as? Bool ?? false
@@ -129,15 +193,18 @@ extension API {
   private(set) var accountID: Int?
   private(set) var counts = VideoCounts()
   private(set) var relation: VideoRelation?
+  private var favoriteOverride: Bool?
+  var isFavorited: Bool { favoriteOverride ?? relation?.favorited ?? false }
   private(set) var loading = false
   private(set) var operation: String?
   var error: String?
   var notice: String?
   private(set) var needsVerification = false
+  private(set) var challenge: InteractionChallenge?
   private var revision = UUID()
   func clear() {
     revision = UUID(); aid = 0; accountID = nil; counts = VideoCounts()
-    relation = nil; loading = false; operation = nil; error = nil; notice = nil; needsVerification = false
+    relation = nil; favoriteOverride = nil; loading = false; operation = nil; error = nil; notice = nil; needsVerification = false; challenge = nil
   }
   func load(detail: Detail, accountID: Int?, api: API) async {
     guard operation == nil else { return }
@@ -153,7 +220,7 @@ extension API {
     do {
       let result = try await api.videoRelation(detail.aid, bvid: detail.video.bvid)
       guard !Task.isCancelled, token == revision, session == api.authenticationGeneration else { return }
-      relation = result; loading = false
+      relation = result; favoriteOverride = result.favorited; loading = false
     } catch {
       guard token == revision, session == api.authenticationGeneration else { return }
       loading = false
@@ -211,7 +278,7 @@ extension API {
       guard token == revision, session == api.authenticationGeneration else { return false }
       if result.like && !before.liked { relation?.liked = true; counts.likes += 1 }
       if result.coin { relation?.coins += result.count; counts.coins += result.count }
-      if result.favorite && !before.favorited { relation?.favorited = true; counts.favorites += 1 }
+      if result.favorite && !before.favorited { relation?.favorited = true; favoriteOverride = true; counts.favorites += 1 }
       let complete = relation?.liked == true && (relation?.coins ?? 0) > 0 && relation?.favorited == true
       notice = complete ? "已三连" : "已完成部分操作，请查看互动状态"
       if !complete { error = "三连未全部完成；已成功的操作已保留，请刷新状态后查看" }
@@ -223,19 +290,27 @@ extension API {
       return false
     }
   }
-  func favoritesSaved(aid: Int, isFavorite: Bool) {
+  func favoritesSaved(aid: Int, isFavorite: Bool, wasFavorite: Bool? = nil) {
     guard self.aid == aid else { return }
-    if let before = relation, before.favorited != isFavorite {
+    revision = UUID(); loading = false
+    if let before = wasFavorite ?? relation?.favorited, before != isFavorite {
       counts.favorites = max(0, counts.favorites + (isFavorite ? 1 : -1))
     }
+    favoriteOverride = isFavorite
     relation?.favorited = isFavorite
     notice = isFavorite ? "收藏已更新" : "已取消收藏"
   }
   private func failure(_ error: Error) {
-    self.error = (error as? BiliError)?.code == -403
+    challenge = (error as? BiliError)?.challenge
+    self.error = challenge != nil ? "请完成官方验证后，再确认提交"
+      : (error as? BiliError)?.code == -403
       ? "哔哩哔哩拒绝了互动请求（-403），请完成官方验证后刷新状态"
       : error.localizedDescription
     needsVerification = (error as? BiliError)?.requiresVerification ?? false
+  }
+  func verificationCompleted() {
+    challenge = nil; needsVerification = false; error = nil
+    notice = "验证已完成，请再次确认操作"
   }
 }
 

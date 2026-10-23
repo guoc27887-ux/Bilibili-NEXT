@@ -8,6 +8,7 @@ import VideoToolbox
 struct BiliError: LocalizedError {
   let text: String
   var code: Int? = nil
+  var challenge: InteractionChallenge? = nil
   var requiresVerification: Bool { [-351, -352, -401, -403, -412].contains(code ?? 0) || text.contains("验证") }
   var errorDescription: String? { text }
 }
@@ -20,23 +21,29 @@ struct Video: Identifiable, Codable, Hashable {
   let duration: Int
   let views: Int
   var publishedAt: Date? = nil
+  var aid: Int? = nil
+  var ownerID: Int? = nil
+  var progress: Int? = nil
+  var recommendationTrackID: String? = nil
   static func deduplicated(_ videos: [Video], excluding: Set<String> = []) -> [Video] {
     var seen = excluding
     return videos.filter { seen.insert($0.id).inserted }
   }
   static func parse(_ j: [String: Any]) -> Video? {
     guard let bvid = j["bvid"] as? String, bvid.hasPrefix("BV") else { return nil }
-    let owner = j["owner"] as? [String: Any] ?? [:]
+    let owner = j["owner"] as? [String: Any] ?? j["author"] as? [String: Any] ?? [:]
     let stat = j["stat"] as? [String: Any] ?? [:]
     let raw = j["duration"] as? String ?? j["length"] as? String ?? "0"
     let seconds = raw.split(separator: ":").reduce(0) { $0 * 60 + (Int($1) ?? 0) }
     return Video(
       bvid: bvid, title: cleanTitle(j["title"] as? String ?? "视频"),
-      cover: j["pic"] as? String ?? "",
+      cover: j["pic"] as? String ?? j["cover"] as? String ?? "",
       author: owner["name"] as? String ?? j["author"] as? String ?? "",
       duration: j["duration"] as? Int ?? seconds,
       views: stat["view"] as? Int ?? j["play"] as? Int ?? 0,
-      publishedAt: ((j["pubdate"] as? NSNumber)?.doubleValue ?? (j["created"] as? NSNumber)?.doubleValue).flatMap { $0 > 0 && $0.isFinite ? Date(timeIntervalSince1970: $0) : nil })
+      publishedAt: ((j["pubdate"] as? NSNumber)?.doubleValue ?? (j["created"] as? NSNumber)?.doubleValue).flatMap { $0 > 0 && $0.isFinite ? Date(timeIntervalSince1970: $0) : nil },
+      aid: j["aid"] as? Int ?? j["id"] as? Int, ownerID: owner["mid"] as? Int, progress: j["progress"] as? Int,
+      recommendationTrackID: j["track_id"] as? String ?? j["trackid"] as? String)
   }
 }
 struct Page: Identifiable {
@@ -54,11 +61,19 @@ struct Detail {
   var ownerFace: String = ""
   var copyright: Int = 1
   var counts = VideoCounts()
+  var collection: VideoCollection? = nil
 }
 struct Streams {
   let videos: [MediaRepresentation]
   let audio: MediaRepresentation
   let names: [Int: String]
+}
+enum VideoCodecPreference: String, CaseIterable, Identifiable, Sendable {
+  case automatic = "auto", av1, hevc
+  var id: String { rawValue }
+  var title: String {
+    switch self { case .automatic: return "自动"; case .av1: return "优先 AV1"; case .hevc: return "优先 HEVC（H.265）" }
+  }
 }
 struct Account {
   let name: String
@@ -83,10 +98,10 @@ func safeFilename(_ s: String) -> String {
 
 final class Vault {
   static let service = "local.BiliGlass.session"
-  static func save(_ data: Data) throws {
+  static func save(_ data: Data, account: String = "cookies") throws {
     let q: [String: Any] = [
       kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-      kSecAttrAccount as String: "cookies",
+      kSecAttrAccount as String: account,
     ]
     let status = SecItemUpdate(q as CFDictionary, [kSecValueData as String: data] as CFDictionary)
     if status == errSecItemNotFound {
@@ -99,19 +114,19 @@ final class Vault {
       throw BiliError(text: "无法保存登录：\(status)")
     }
   }
-  static func load() -> Data? {
+  static func load(account: String = "cookies") -> Data? {
     var value: CFTypeRef?
     let status = SecItemCopyMatching(
       [
         kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
-        kSecAttrAccount as String: "cookies", kSecReturnData as String: true,
+        kSecAttrAccount as String: account, kSecReturnData as String: true,
       ] as CFDictionary, &value)
     return status == errSecSuccess ? value as? Data : nil
   }
-  static func clear() {
+  static func clear(account: String = "cookies") {
     SecItemDelete(
-      [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service]
-        as CFDictionary)
+      [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+       kSecAttrAccount as String: account] as CFDictionary)
   }
 }
 
@@ -123,9 +138,11 @@ final class Vault {
   ]
   let session: URLSession
   var cookies: [String: String] = [:]
+  var appCoinAuthorization: AppCoinAuthorization?
   private var wbiKey: String?
   private var navigationTask: (id: UUID, task: Task<[String: Any], Error>)?
   var authenticationGeneration = UUID()
+  var interactionVerification: InteractionVerificationGrant?
   var dynamicCursor = ""
   var dynamicHasMore = true
   private let searchID = UUID().uuidString.lowercased() + "infoc"
@@ -140,23 +157,32 @@ final class Vault {
       let saved = try? JSONDecoder().decode([String: String].self, from: data)
     {
       cookies = saved
+      if let data = Vault.load(account: AppCoinAuthorization.vaultAccount) {
+        appCoinAuthorization = try? JSONDecoder().decode(AppCoinAuthorization.self, from: data)
+      }
     }
   }
   func restoreCredentials() async {
     let generation = authenticationGeneration
-    let data = await Task.detached(priority: .userInitiated) { Vault.load() }.value
+    let (data, appData) = await Task.detached(priority: .userInitiated) {
+      (Vault.load(), Vault.load(account: AppCoinAuthorization.vaultAccount))
+    }.value
     guard !Task.isCancelled, generation == authenticationGeneration, let data,
       let saved = try? JSONDecoder().decode([String: String].self, from: data)
     else { return }
     cookies = saved
+    appCoinAuthorization = appData.flatMap { try? JSONDecoder().decode(AppCoinAuthorization.self, from: $0) }
   }
   var signedIn: Bool { cookies["SESSDATA"] != nil }
   func logout() {
     navigationTask?.task.cancel()
     navigationTask = nil
     authenticationGeneration = UUID()
+    interactionVerification = nil
     cookies = [:]
+    appCoinAuthorization = nil
     Vault.clear()
+    Vault.clear(account: AppCoinAuthorization.vaultAccount)
     WebSession.shared.reset()
     wbiKey = nil
   }
@@ -230,9 +256,12 @@ final class Vault {
       guard signedIn else { throw BiliError(text: "登录凭据缺失，请重新扫码") }
       authenticationGeneration = UUID()
       try Vault.save(JSONEncoder().encode(cookies))
+      appCoinAuthorization = nil
+      Vault.clear(account: AppCoinAuthorization.vaultAccount)
     }
     if let object = root["data"] as? [String: Any] { return object }
     if let array = root["data"] as? [Any] { return ["items": array] }
+    if let result = root["result"] as? [String: Any] { return result }
     return ["value": root["data"] ?? NSNull()]
   }
   func messageRequest(_ path: String, _ values: [String: String] = [:], write: Bool = false)
@@ -319,10 +348,10 @@ final class Vault {
     let d = try await request("/x/web-interface/popular", ["pn": "\(page)", "ps": "24"])
     return (d["list"] as? [[String: Any]] ?? []).compactMap(Video.parse)
   }
-  func search(_ term: String, page: Int) async throws -> [Video] {
+  func search(_ term: String, page: Int, options: SearchOptions = SearchOptions()) async throws -> [Video] {
     let d = try await request(
       "/x/web-interface/wbi/search/type",
-      ["search_type": "video", "keyword": term, "page": "\(page)", "page_size": "24"], signed: true)
+      ["search_type": "video", "keyword": term, "page": "\(page)", "page_size": "24"].merging(options.parameters) { _, new in new }, signed: true)
     return (d["result"] as? [[String: Any]] ?? []).compactMap(Video.parse)
   }
   func detail(_ bvid: String) async throws -> Detail {
@@ -336,7 +365,7 @@ final class Vault {
       }, aid: d["aid"] as? Int ?? 0, ownerID: (d["owner"] as? [String: Any])?["mid"] as? Int ?? 0,
       ownerFace: (d["owner"] as? [String: Any])?["face"] as? String ?? "",
       copyright: d["copyright"] as? Int ?? 1,
-      counts: VideoCounts(d["stat"] as? [String: Any] ?? [:]))
+      counts: VideoCounts(d["stat"] as? [String: Any] ?? [:]), collection: VideoCollection.parse(d["ugc_season"]))
   }
   func streams(bvid: String, cid: Int, quality: Int = 127) async throws -> Streams {
     let d = try await request(
@@ -408,15 +437,26 @@ final class Vault {
     if transfer == 16 || [125, 126].contains(j["id"] as? Int ?? 0) { return .pq }
     return .sdr
   }
-  static func bestVideo(_ videos: [MediaRepresentation], quality: Int) -> MediaRepresentation? {
+  static func videoCandidates(_ videos: [MediaRepresentation], quality: Int,
+    preference: VideoCodecPreference? = nil) -> [MediaRepresentation] {
     let candidates = videos.filter { $0.id == quality }
-    if quality == 127, let av1 = candidates.first(where: { $0.codecs.hasPrefix("av01") }) {
-      return av1
+    let choice = preference ?? VideoCodecPreference(rawValue: UserDefaults.standard.string(forKey: "videoCodecPreference") ?? "auto") ?? .automatic
+    let order = choice == .av1 || (choice == .automatic && quality == 127)
+      ? ["av1", "hevc", "h264"] : choice == .hevc ? ["hevc", "av1", "h264"] : ["hevc", "h264", "av1"]
+    func rank(_ codec: String) -> Int {
+      let family = codec.hasPrefix("av01") ? "av1" :
+        ["hvc1", "hev1", "dvh1", "dvhe"].contains(String(codec.prefix(4))) ? "hevc" :
+        codec.hasPrefix("avc1") ? "h264" : "unknown"
+      return order.firstIndex(of: family) ?? order.count
     }
-    // Prefer the system's efficient HEVC path; keep the original Dolby sample type intact.
-    return candidates.first {
-      ["hvc1", "hev1", "dvh1", "dvhe"].contains(String($0.codecs.prefix(4)))
-    } ?? candidates.first { $0.codecs.hasPrefix("avc1") } ?? candidates.first
+    return candidates.enumerated().sorted {
+      let a = rank($0.element.codecs), b = rank($1.element.codecs)
+      return a == b ? $0.offset < $1.offset : a < b
+    }.map(\.element)
+  }
+  static func bestVideo(_ videos: [MediaRepresentation], quality: Int,
+    preference: VideoCodecPreference? = nil) -> MediaRepresentation? {
+    videoCandidates(videos, quality: quality, preference: preference).first
   }
   static func mixin(_ key: String) -> String {
     let table = [

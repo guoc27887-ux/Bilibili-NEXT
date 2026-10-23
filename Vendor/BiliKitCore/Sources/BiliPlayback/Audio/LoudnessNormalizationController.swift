@@ -31,7 +31,7 @@ final class LoudnessNormalizationController {
         audioTracks: [SelectedPlaybackAudioTrack],
         enabled: Bool
     ) {
-        guard #available(macOS 27.0, *),
+        guard #available(macOS 27.0, iOS 27.0, *),
             enabled,
             LoudnessNormalizationPolicy().needsAttenuation(audioTracks.map(\.track)),
             let defaultTrack = audioTracks.first(where: { $0.track.isDefault }),

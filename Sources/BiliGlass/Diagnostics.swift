@@ -2,11 +2,295 @@ import AVFoundation
 import AppKit
 import BiliModels
 import BiliNetworking
+import CryptoKit
 import Foundation
 import SwiftUI
 import Synchronization
+import WebKit
 
 @MainActor enum Diagnostics {
+  /// Opt-in check against an already-full video only. Never spend a test coin.
+  static func fullCoinCheck(api: API, bvid: String, output: URL,
+                            showChallenge: ((InteractionChallenge) -> Void)? = nil) async {
+    var result: [String: Any] = ["bvid": bvid]
+    do {
+      let detail = try await api.detail(bvid)
+      let before = try await api.videoRelation(detail.aid, bvid: bvid)
+      let limit = detail.copyright == 2 ? 1 : 2
+      result["beforeCoins"] = before.coins; result["limit"] = limit
+      guard before.coins >= limit else { throw BiliError(text: "诊断已停止：视频尚未投满") }
+      let arguments = ProcessInfo.processInfo.arguments
+      if let i = arguments.firstIndex(of: "--coin-browser-reference-check"), arguments.indices.contains(i + 1) {
+        result["comparison"] = try await compareBrowserCoinReference(api: api, detail: detail,
+          file: URL(fileURLWithPath: arguments[i + 1]))
+        let data = try JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: output, options: .atomic)
+        return
+      }
+      if ProcessInfo.processInfo.arguments.contains("--coin-web-ticket-check") {
+        // Official web client protocol; this public SDK key is not an account credential.
+        let timestamp = Int(Date().timeIntervalSince1970)
+        let signature = HMAC<SHA256>.authenticationCode(for: Data("ts\(timestamp)".utf8),
+          using: SymmetricKey(data: Data("XgwSnGZ1p".utf8))).map { String(format: "%02x", $0) }.joined()
+        var url = URLComponents(string: "https://api.bilibili.com/bapis/bilibili.api.ticket.v1.Ticket/GenWebTicket")!
+        url.queryItems = ["key_id": "ec02", "hexsign": signature, "context[ts]": String(timestamp),
+          "csrf": api.cookies["bili_jct"] ?? ""].map { URLQueryItem(name: $0.key, value: $0.value) }
+        var request = URLRequest(url: url.url!); request.httpMethod = "POST"
+        API.mediaHeaders.forEach { request.setValue($1, forHTTPHeaderField: $0) }
+        request.setValue("https://www.bilibili.com", forHTTPHeaderField: "Origin")
+        request.setValue(api.cookies.map { "\($0.key)=\($0.value)" }.joined(separator: "; "), forHTTPHeaderField: "Cookie")
+        let auth = api.authenticationGeneration
+        let (data, response) = try await api.session.data(for: request)
+        guard auth == api.authenticationGeneration else { throw CancellationError() }
+        let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        result["ticketHTTPStatus"] = (response as? HTTPURLResponse)?.statusCode
+        result["ticketCode"] = root?["code"]
+        if root?["code"] as? Int == 0, let payload = root?["data"] as? [String: Any],
+          let ticket = payload["ticket"] as? String, !ticket.isEmpty,
+          let created = payload["created_at"] as? Int, let ttl = payload["ttl"] as? Int, ttl > 0 {
+          api.cookies["bili_ticket"] = ticket
+          api.cookies["bili_ticket_expires"] = String(created + ttl)
+          result["ticketReady"] = true
+        }
+      }
+      result["beforeBalance"] = try await api.request("/x/web-interface/nav")["money"]
+      do {
+        if ProcessInfo.processInfo.arguments.contains("--coin-web-context-check") {
+          // Compare the official web form for a paused, not-started player.
+          // This diagnostic still requires an already-full video above.
+          result["requestVariant"] = "official-web-context"
+          try await api.prepareVideoInteraction()
+          let parameters = [
+            "aid": String(detail.aid), "multiply": "1", "select_like": "0", "cross_domain": "true",
+            "source": "web_normal", "ga": "1", "eab_x": "2", "ramval": "0",
+            "spmid": "333.788.0.0", "from_spmid": "", "statistics": #"{"appId":100,"platform":5}"#,
+          ]
+          if ProcessInfo.processInfo.arguments.contains("--coin-browser-transport-check") {
+            result["requestVariant"] = "browser-transport-with-web-context"
+            let root = try await browserCoinRequest(api: api, bvid: bvid, parameters: parameters)
+            result["browserHTTPStatus"] = root["httpStatus"]
+            result["fullWebPage"] = root["fullPage"]
+            let code = root["code"] as? Int ?? -1
+            result["hasOfficialChallenge"] = ((root["data"] as? [String: Any])?["ga_data"] as? [String: Any]) != nil
+            guard code == 0 else { throw BiliError(text: root["message"] as? String ?? "网页请求失败", code: code) }
+          } else {
+            _ = try await api.post("/x/web-interface/coin/add", parameters, videoBVID: bvid)
+          }
+        } else {
+          _ = try await api.addVideoCoins(aid: detail.aid, bvid: bvid, amount: 1, alsoLike: false)
+        }
+        result["unexpectedSuccess"] = true
+      } catch {
+        result["code"] = (error as? BiliError)?.code
+        result["message"] = error.localizedDescription
+        if result["hasOfficialChallenge"] == nil { result["hasOfficialChallenge"] = (error as? BiliError)?.challenge != nil }
+        if let challenge = (error as? BiliError)?.challenge,
+          let payload = try? JSONSerialization.jsonObject(with: challenge.payload) as? [String: Any] {
+          result["challengeFields"] = payload.keys.sorted()
+          showChallenge?(challenge)
+        }
+      }
+      result["afterCoins"] = try await api.videoRelation(detail.aid, bvid: bvid).coins
+      result["afterBalance"] = try await api.request("/x/web-interface/nav")["money"]
+      result["cookieNames"] = api.cookies.keys.sorted()
+    } catch { result["error"] = error.localizedDescription }
+    if let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]) {
+      try? data.write(to: output, options: .atomic)
+    }
+  }
+  /// Explicit local diagnostic only. Reference credentials stay in memory, are never
+  /// installed in the app's vault, and can only test the same account's full video.
+  private static func compareBrowserCoinReference(api: API, detail: Detail, file: URL) async throws -> [String: Any] {
+    let data = try Data(contentsOf: file)
+    guard data.count < 65_536,
+      let reference = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+      let cookieReference = reference["cookies"] as? [String: String],
+      cookieReference["DedeUserID"] == api.cookies["DedeUserID"],
+      let string = reference["url"] as? String, let url = URL(string: string),
+      url.scheme == "https", url.host == "api.bilibili.com", url.path == "/x/web-interface/coin/add",
+      let bodyReference = reference["body"] as? [String: String],
+      bodyReference["aid"] == String(detail.aid), bodyReference["multiply"] == "1",
+      bodyReference["select_like"] == "0",
+      let headers = reference["headers"] as? [String: String]
+    else { throw BiliError(text: "浏览器对照文件不匹配，已停止") }
+    let authentication = api.authenticationGeneration
+    let browser = API(loadCredentials: false)
+    browser.cookies = cookieReference
+    var result: [String: Any] = ["cookieNames": cookieReference.keys.sorted(),
+      "matchingCookieNames": api.cookies.keys.filter { cookieReference[$0] == api.cookies[$0] }.sorted()]
+    let isolateSession = ProcessInfo.processInfo.arguments.contains("--coin-session-isolation")
+    let nativeAuth = API(loadCredentials: false), browserAuth = API(loadCredentials: false)
+    let authNames: Set<String> = ["SESSDATA", "bili_jct", "DedeUserID", "DedeUserID__ckMd5", "sid"]
+    nativeAuth.cookies = cookieReference.filter { !authNames.contains($0.key) }
+      .merging(api.cookies.filter { authNames.contains($0.key) }) { _, new in new }
+    browserAuth.cookies = api.cookies.filter { !authNames.contains($0.key) }
+      .merging(cookieReference.filter { authNames.contains($0.key) }) { _, new in new }
+    let variants = isolateSession
+      ? [("nativeAuthBrowserDevice", nativeAuth), ("browserAuthNativeRequest", browserAuth)]
+      : [("nativeSession", api), ("browserSession", browser)]
+    for (name, client) in variants {
+      try Task.checkCancellation()
+      guard api.authenticationGeneration == authentication else { throw CancellationError() }
+      let relation = try await client.videoRelation(detail.aid, bvid: detail.video.bvid)
+      guard relation.coins >= (detail.copyright == 2 ? 1 : 2) else { throw BiliError(text: "对照账号尚未投满，已停止") }
+      let beforeBalance = try await client.request("/x/web-interface/nav")["money"]
+      if name == "browserAuthNativeRequest" {
+        var status: [String: Any] = [:]
+        do {
+          _ = try await client.addVideoCoins(aid: detail.aid, bvid: detail.video.bvid, amount: 1, alsoLike: false)
+          status["code"] = 0
+        } catch {
+          status["code"] = (error as? BiliError)?.code ?? -1
+          status["message"] = error.localizedDescription
+        }
+        status["beforeCoins"] = relation.coins
+        status["afterCoins"] = try await client.videoRelation(detail.aid, bvid: detail.video.bvid).coins
+        status["beforeBalance"] = beforeBalance
+        status["afterBalance"] = try await client.request("/x/web-interface/nav")["money"]
+        result[name] = status
+        continue
+      }
+      var body = bodyReference
+      body["csrf"] = client.cookies["bili_jct"]
+      // The diagnostic has no active player; never replay captured watch time.
+      body["eab_x"] = "2"; body["ramval"] = "0"
+      var request = URLRequest(url: url); request.httpMethod = "POST"
+      request.httpBody = API.formBody(body)
+      for key in ["user-agent", "accept", "content-type", "origin", "referer", "accept-language"] {
+        request.setValue(headers[key], forHTTPHeaderField: key)
+      }
+      request.setValue(client.cookies.map { "\($0.key)=\($0.value)" }.joined(separator: "; "), forHTTPHeaderField: "Cookie")
+      let (data, response) = try await client.session.data(for: request)
+      let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+      result[name] = ["httpStatus": (response as? HTTPURLResponse)?.statusCode ?? 0,
+        "code": root["code"] ?? NSNull(), "message": root["message"] ?? NSNull(),
+        "beforeCoins": relation.coins,
+        "afterCoins": try await client.videoRelation(detail.aid, bvid: detail.video.bvid).coins,
+        "beforeBalance": beforeBalance ?? NSNull(),
+        "afterBalance": try await client.request("/x/web-interface/nav")["money"] ?? NSNull()]
+    }
+    return result
+  }
+  /// Called only after fullCoinCheck has verified that the video is already full.
+  /// Compare the browser's normal network transport, without loading or solving a captcha.
+  private static func browserCoinRequest(api: API, bvid: String, parameters: [String: String]) async throws -> [String: Any] {
+    let authentication = api.authenticationGeneration
+    let configuration = WKWebViewConfiguration()
+    configuration.websiteDataStore = WebSession.shared.dataStore
+    configuration.mediaTypesRequiringUserActionForPlayback = .all
+    let view = WKWebView(frame: .zero, configuration: configuration)
+    view.customUserAgent = API.userAgent
+    await WebSession.shared.prepare(api: api)
+    let fullPage = ProcessInfo.processInfo.arguments.contains("--coin-full-web-page-check")
+    let videoURL = URL(string: "https://www.bilibili.com/video/\(bvid)/")!
+    if fullPage { view.load(URLRequest(url: videoURL)) }
+    else {
+      view.loadHTMLString("<html><body><script>window.transportReady = true;</script></body></html>", baseURL: videoURL)
+    }
+    defer { view.stopLoading() }
+    var ready = false
+    for _ in 0..<100 {
+      let predicate = fullPage
+        ? "document.readyState === 'complete' && window.__INITIAL_STATE__?.videoData?.bvid === '\(bvid)' && !!window.player"
+        : "window.transportReady === true"
+      if (try? await view.evaluateJavaScript(predicate)) as? Bool == true { ready = true; break }
+      try await Task.sleep(for: .milliseconds(fullPage ? 200 : 50))
+    }
+    try Task.checkCancellation()
+    guard authentication == api.authenticationGeneration else { throw CancellationError() }
+    guard ready else { throw BiliError(text: "完整官网页面未就绪，未发送投币请求") }
+    var body = parameters
+    body["csrf"] = api.cookies["bili_jct"]
+    let value = try await view.callAsyncJavaScript("""
+      if (fullPage) {
+        const video = window.__INITIAL_STATE__?.videoData;
+        if (!video || String(video.aid) !== parameters.aid) throw new Error('Video changed');
+        parameters.eab_x = window.player.isPaused() ? '2' : '1';
+        const actualTime = window.player.getMediaInfo()?.absolutePlayTime;
+        if (Number.isFinite(actualTime)) parameters.ramval = String(actualTime);
+        else delete parameters.ramval;
+      }
+      const response = await fetch('https://api.bilibili.com/x/web-interface/coin/add', {
+        method:'POST', credentials:'include',
+        headers:{'Content-Type':'application/x-www-form-urlencoded'},
+        body:new URLSearchParams(parameters), signal:AbortSignal.timeout(25000)
+      });
+      const root = await response.json();
+      return {...root,httpStatus:response.status,fullPage};
+      """, arguments: ["parameters": body, "fullPage": fullPage], in: nil, contentWorld: .page)
+    guard authentication == api.authenticationGeneration,
+      let root = value as? [String: Any] else { throw CancellationError() }
+    return root
+  }
+  static func previewReadCheck(api: API, bvid: String, output: URL) async {
+    var result: [String: Any] = ["bvid": bvid]
+    do {
+      let detail = try await api.detail(bvid)
+      let data = try await api.request("/x/player/videoshot", ["aid": String(detail.aid), "cid": String(detail.pages.first?.id ?? 0), "index": "1"])
+      result["metadata"] = data.filter { !["image", "index", "pvdata"].contains($0.key) }
+      result["indexCount"] = (data["index"] as? [Any])?.count ?? 0
+      let urls = (data["image"] as? [String] ?? []).compactMap(API.publicMediaURL)
+      result["sheetCount"] = urls.count
+      if let url = urls.first {
+        do {
+          let blob = try await ThumbnailCache.shared.data(url)
+          result["bytes"] = blob.count
+          if let source = CGImageSourceCreateWithData(blob as CFData, nil),
+            let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any] {
+            result["imageWidth"] = properties[kCGImagePropertyPixelWidth]
+            result["imageHeight"] = properties[kCGImagePropertyPixelHeight]
+            result["imageType"] = CGImageSourceGetType(source)
+          }
+          let image = try await PreviewSheets.shared.image(url)
+          result["decodedWidth"] = image.width; result["decodedHeight"] = image.height
+          result["decodedBytes"] = image.image.bytesPerRow * image.height
+          let shots = try await api.previewShots(data: data, cid: detail.pages.first?.id ?? 0)
+          result["resolvedIndexCount"] = shots.times.count
+          result["indexPrefix"] = Array(shots.times.prefix(10))
+          let model = VideoPreviewModel()
+          await model.load(shots.frame(at: 22))
+          result["cropCreated"] = model.image != nil
+          result["cropWidth"] = model.image?.width ?? 0; result["cropHeight"] = model.image?.height ?? 0
+        } catch { result["imageError"] = error.localizedDescription }
+      }
+    } catch { result["error"] = error.localizedDescription }
+    if let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]) { try? data.write(to: output, options: .atomic) }
+  }
+  static func featureReadChecks(store: Store, output: URL) async {
+    var results: [String: Any] = [:]
+    for id in [1005, 1012] {
+      do { results["region_\(id)"] = ["count": try await store.api.regionVideos(id, page: 1).count] }
+      catch { results["region_\(id)"] = ["error": error.localizedDescription] }
+    }
+    do {
+      let detail = try await store.api.detail("BV1RSnc6nEfN")
+      let model = VideoExtras()
+      await model.load(detail: detail, cid: detail.pages.first?.id ?? 0, api: store.api)
+      results["video"] = ["related": model.related.count, "tags": model.tags.count, "subtitles": model.subtitles.count,
+        "chapters": model.chapters.count, "shots": model.shots?.times.count ?? 0, "collection": detail.collection?.items.count ?? 0,
+        "error": model.error ?? "", "metadataError": model.subtitleError ?? ""]
+      if let subtitle = model.subtitles.first { await model.selectSubtitle(subtitle.id, api: store.api); results["subtitleCues"] = model.lines.count }
+    } catch { results["videoError"] = error.localizedDescription }
+    do { results["suggestions"] = try await store.api.suggestions("相机").count } catch { results["suggestionError"] = error.localizedDescription }
+    do { results["userSearch"] = try await store.api.searchUsers("地上相机AAA", page: 1).count } catch { results["userSearchError"] = error.localizedDescription }
+    do {
+      let panel = try await store.api.request("/x/emote/user/panel/web", ["business": "reply"])
+      results["emojiPackages"] = (panel["packages"] as? [Any])?.count ?? 0
+    } catch { results["emojiError"] = error.localizedDescription }
+    if store.api.signedIn {
+      let blacklist = BlacklistModel(); await blacklist.load(api: store.api)
+      let firstCount = blacklist.rows.count
+      await blacklist.load(api: store.api)
+      results["blacklist"] = ["page1Count": firstCount, "page2Count": blacklist.rows.count, "hasMore": blacklist.hasMore, "error": blacklist.error ?? ""]
+      let inbox = InboxModel(); await inbox.load(api: store.api)
+      results["conversationPage1"] = inbox.paginationDiagnostics
+      await inbox.load(api: store.api, more: true)
+      results["conversationPage2"] = inbox.paginationDiagnostics
+      if let conversation = inbox.conversations.first(where: { !$0.system }) { inbox.select(conversation); await inbox.loadMessages(api: store.api, markRead: false) }
+      results["messages"] = ["count": inbox.messages.count, "emotes": inbox.emotes.count, "error": inbox.messageError ?? ""]
+    }
+    if let data = try? JSONSerialization.data(withJSONObject: results, options: [.sortedKeys, .prettyPrinted]) { try? data.write(to: output, options: .atomic) }
+  }
   static func special(store: Store, output: URL, bvid: String) async {
     do {
       let detail = try await store.api.detail(bvid)
@@ -62,6 +346,8 @@ import Synchronization
         "newDecodedFrame": newFrame,
         "decodedFrameTime": frameTime.seconds.isFinite ? frameTime.seconds : -1,
         "showPlayer": store.showPlayer,
+        "miniPlayer": store.showsMiniPlayer,
+        "playbackGeneration": store.playback.generation.uuidString,
         "feed": ["count": store.videos.count, "page": store.page, "busy": store.busy,
                  "requestMS": store.feedMilliseconds, "error": store.error ?? ""] as [String: Any],
         "comments": ["loaded": store.comments.items.count, "page": store.comments.page,
@@ -77,6 +363,8 @@ import Synchronization
         ] as [String: Any],
         "interaction": store.videoActions.relation.map { ["liked": $0.liked, "coins": $0.coins, "favorite": $0.favorited] as [String: Any] } ?? [:],
         "commentCursor": store.comments.paginationDiagnostics,
+        "conversationCursor": store.inbox.paginationDiagnostics,
+        "personAvoidance": store.playback.personAvoidance.statistics,
         "loadingStage": store.playback.loadingMessage,
         "cdn": store.playback.routeDiagnostics,
         "cdnProbes": await store.playback.cdnAttempts(),

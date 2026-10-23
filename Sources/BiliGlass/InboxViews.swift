@@ -4,8 +4,7 @@ struct NativeInboxPage: View {
   @Bindable var store: Store
   @State private var tab = 0
   @State private var query = ""
-  @State private var followingBottom = true
-  @State private var messagePosition = ScrollPosition(edge: .bottom)
+  @State private var imageDrafts: [String: URL] = [:]
   var body: some View {
     @Bindable var inbox = store.inbox
     VStack(spacing: 16) {
@@ -122,31 +121,8 @@ struct NativeInboxPage: View {
           }.buttonStyle(.glass).help("刷新会话")
         }.padding(16)
         Divider().padding(.horizontal, 16)
-        Group {
-          ScrollView {
-            LazyVStack(spacing: 16) {
-              if inbox.hasOlder {
-                Button("更早的消息") { Task { await inbox.loadMessages(api: store.api, older: true) } }
-                  .buttonStyle(.glass)
-              }
-              if inbox.loadingMessages { ProgressView().controlSize(.small) }
-              ForEach(inbox.messages) { message in
-                messageBubble(message, own: message.sender == store.account?.mid).id(message.id)
-              }
-              Color.clear.frame(height: 1).id("bottom")
-            }.padding(18)
-          }.defaultScrollAnchor(.bottom, for: .initialOffset)
-            .defaultScrollAnchor(.bottom, for: .alignment)
-            .scrollPosition($messagePosition)
-            .onScrollGeometryChange(for: Bool.self) { geometry in
-              geometry.contentOffset.y + geometry.containerSize.height >= geometry.contentSize
-                .height - 80
-            } action: { _, value in
-              followingBottom = value
-            }
-            .onChange(of: inbox.messages.last?.id) {
-              if followingBottom { messagePosition.scrollTo(edge: .bottom) }
-            }
+        ConversationTimeline(store: store) { message in
+          messageBubble(message, own: message.sender == store.account?.mid)
         }.id(selected.id)
         if let error = inbox.messageError {
           HStack {
@@ -159,6 +135,16 @@ struct NativeInboxPage: View {
           }.padding(12)
         }
         Divider().padding(.horizontal, 16)
+        HStack {
+          EmojiPicker(api: store.api) { emote in inbox.emotes[emote.token] = emote; inbox.drafts[selected.id, default: ""] += emote.token }
+          Button { if let url = ImageAttachment.choose().first { imageDrafts[selected.id] = url } } label: { Image(systemName: "photo.badge.plus") }.buttonStyle(.glass).help("发送图片").accessibilityLabel("添加私信图片")
+          if let image = imageDrafts[selected.id] {
+            Text(image.lastPathComponent).font(.caption).lineLimit(1)
+            Button("取消图片") { imageDrafts[selected.id] = nil }.buttonStyle(.plain)
+            Button("发送图片") { Task { if let account = store.account, await inbox.sendImage(image, api: store.api, account: account) { imageDrafts[selected.id] = nil } } }.buttonStyle(.glassProminent)
+          }
+          Spacer()
+        }.padding(.horizontal, 14).padding(.top, 10).disabled(inbox.sending)
         HStack(alignment: .bottom, spacing: 12) {
           TextField(
             "发送私信",
@@ -179,7 +165,6 @@ struct NativeInboxPage: View {
           )
         }.padding(14)
       }.floatingGlass(22).clipShape(RoundedRectangle(cornerRadius: 22)).task(id: selected.id) {
-        followingBottom = true
         await inbox.loadMessages(api: store.api)
         while !Task.isCancelled {
           do { try await Task.sleep(for: .seconds(15)) } catch { return }
@@ -209,7 +194,7 @@ struct NativeInboxPage: View {
         if let share = message.share {
           MessageShareCard(share: share, store: store)
         } else {
-        Text(message.text).textSelection(.enabled).foregroundStyle(
+        CommentText(content: CommentTextContent(message: message.text, emotes: store.inbox.emotes), copyTitle: "复制消息").foregroundStyle(
           message.retracted ? .secondary : .primary
         ).fixedSize(horizontal: false, vertical: true)
         if let bvid = message.video {
@@ -221,37 +206,19 @@ struct NativeInboxPage: View {
         Text(message.date.formatted(AppDateFormat.timestamp)).font(.caption2)
           .foregroundStyle(.secondary)
       }.padding(14).appGlass(18, tint: own ? biliPink.opacity(0.12) : .clear)
+        .contextMenu {
+          Button("复制消息") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(message.text, forType: .string) }
+          if let account = store.account, inboxCanRecall(message, accountID: account.mid) {
+            Button("撤回") { Task { await store.inbox.recall(message, api: store.api, account: account) } }.disabled(store.inbox.sending)
+          }
+        }
       if !own { Spacer(minLength: 50) }
     }
     }
   }
+  private func inboxCanRecall(_ message: PrivateMessage, accountID: Int) -> Bool { store.inbox.canRecall(message, accountID: accountID) }
 }
 
-struct NativeNotice: Identifiable {
-  let id: String
-  let mid: Int
-  let name: String
-  let face: String
-  let text: String
-  let quote: String
-  let date: Date
-  let url: URL?
-  static func parse(_ raw: [String: Any]) -> NativeNotice? {
-    guard let id = (raw["id"] as? NSNumber)?.stringValue ?? raw["id"] as? String else { return nil }
-    let user = raw["user"] as? [String: Any] ?? (raw["users"] as? [[String: Any]])?.first ?? [:]
-    let item = raw["item"] as? [String: Any] ?? [:]
-    let time =
-      raw["reply_time"] as? Double ?? raw["at_time"] as? Double ?? raw["like_time"] as? Double ?? 0
-    return NativeNotice(
-      id: id, mid: user["mid"] as? Int ?? 0,
-      name: user["nickname"] as? String ?? user["name"] as? String ?? "用户",
-      face: user["avatar"] as? String ?? user["face"] as? String ?? "",
-      text: item["source_content"] as? String ?? item["title"] as? String ?? "收到新的互动",
-      quote: item["target_reply_content"] as? String ?? item["desc"] as? String ?? "",
-      date: Date(timeIntervalSince1970: time),
-      url: (item["uri"] as? String).flatMap(URL.init(string:)))
-  }
-}
 struct NativeNotificationsPage: View {
   @Bindable var store: Store
   let kind: Int

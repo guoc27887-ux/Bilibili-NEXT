@@ -9,14 +9,18 @@ struct WebTarget: Identifiable {
 @MainActor final class WebSession {
   static let shared = WebSession()
   let dataStore = WKWebsiteDataStore.nonPersistent()
+  static func cookie(name: String, value: String) -> HTTPCookie? {
+    var properties: [HTTPCookiePropertyKey: Any] = [
+      .domain: ".bilibili.com", .path: "/", .name: name, .value: value, .secure: "TRUE",
+    ]
+    // Foundation treats the presence of HttpOnly as true, even for "FALSE".
+    // The website must read bili_jct to include its CSRF value in form posts.
+    if name == "SESSDATA" { properties[HTTPCookiePropertyKey("HttpOnly")] = "TRUE" }
+    return HTTPCookie(properties: properties)
+  }
   func prepare(api: API) async {
     for (name, value) in api.cookies {
-      guard
-        let cookie = HTTPCookie(properties: [
-          .domain: ".bilibili.com", .path: "/", .name: name, .value: value, .secure: "TRUE",
-          HTTPCookiePropertyKey("HttpOnly"): name == "SESSDATA" ? "TRUE" : "FALSE",
-        ])
-      else { continue }
+      guard let cookie = Self.cookie(name: name, value: value) else { continue }
       await dataStore.httpCookieStore.setCookie(cookie)
     }
   }
@@ -62,6 +66,7 @@ struct OfficialWebView: NSViewRepresentable {
     config.websiteDataStore = WebSession.shared.dataStore
     config.mediaTypesRequiringUserActionForPlayback = .all
     let view = WKWebView(frame: .zero, configuration: config)
+    view.customUserAgent = API.userAgent
     view.navigationDelegate = context.coordinator
     view.uiDelegate = context.coordinator
     view.allowsBackForwardNavigationGestures = true
@@ -185,7 +190,7 @@ struct OfficialWebView: NSViewRepresentable {
                 self.api.cookies[c.name] = c.value
                 authChanged = true
               }
-            } else if ["buvid3", "buvid4", "b_nut", "_uuid", "b_lsid"].contains(c.name) {
+            } else if API.interactionCookieNames.contains(c.name), c.expiresDate.map({ $0 > Date() }) ?? true {
               self.api.cookies[c.name] = c.value
             }
           }
@@ -201,6 +206,7 @@ struct OfficialWebView: NSViewRepresentable {
 
 struct WebFunctionsPage: View {
   @Bindable var store: Store
+  @State private var showBlacklist = false
   var body: some View {
     ScrollView {
       VStack(alignment: .leading, spacing: 22) {
@@ -220,6 +226,9 @@ struct WebFunctionsPage: View {
             Label("应用设置", systemImage: "gearshape").frame(maxWidth: .infinity, alignment: .leading)
               .padding(22).floatingGlass(22)
           }.buttonStyle(.plain)
+          Button { showBlacklist = true } label: {
+            Label("黑名单", systemImage: "person.slash").frame(maxWidth: .infinity, alignment: .leading).padding(22).floatingGlass(22)
+          }.buttonStyle(.plain).disabled(store.account == nil)
         }
         VStack(alignment: .leading, spacing: 16) {
           Text("哔哩哔哩服务").font(.headline)
@@ -229,6 +238,6 @@ struct WebFunctionsPage: View {
           Text("这些服务在默认浏览器中打开。").font(.caption).foregroundStyle(.secondary)
         }.padding(22).frame(maxWidth: .infinity, alignment: .leading).floatingGlass(24)
       }.padding(AppLayout.pageInset).padding(.vertical, 8)
-    }
+    }.sheet(isPresented: $showBlacklist) { BlockedAuthorsPage(store: store) }
   }
 }

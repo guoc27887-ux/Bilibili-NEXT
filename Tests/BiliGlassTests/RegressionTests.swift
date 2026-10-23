@@ -1,8 +1,32 @@
 import Foundation
+import BiliModels
 import Testing
 @testable import BiliGlass
 
 @Suite struct RegressionTests {
+  @Test @MainActor func codecPreferenceKeepsTheRequestedQualityAndOrderedFallbacks() throws {
+    func video(_ codec: String, quality: Int = 80) throws -> MediaRepresentation {
+      try MediaRepresentation(id: quality, kind: .video, codecs: codec, mimeType: "video/mp4",
+        primaryURL: URL(string: "https://fixture.test/\(codec).m4s")!,
+        segmentBase: SegmentBase(initialization: MediaByteRange(start: 0, endInclusive: 127),
+          index: MediaByteRange(start: 128, endInclusive: 511)))
+    }
+    let avc = try video("avc1.640028"), hevc = try video("hvc1.1.6.L120"), av1 = try video("av01.0.08M.08")
+    let sources = [avc, hevc, av1, try video("av01.0.08M.08", quality: 64)]
+    #expect(API.videoCandidates(sources, quality: 80, preference: .av1).map(\.codecs) == [av1.codecs, hevc.codecs, avc.codecs])
+    #expect(API.videoCandidates(sources, quality: 80, preference: .hevc).map(\.codecs) == [hevc.codecs, av1.codecs, avc.codecs])
+    #expect(API.bestVideo([avc, hevc], quality: 80, preference: .av1)?.codecs == hevc.codecs)
+    #expect(API.bestVideo([avc, av1], quality: 80, preference: .hevc)?.codecs == av1.codecs)
+    #expect(API.bestVideo([avc], quality: 80, preference: .hevc)?.codecs == avc.codecs)
+    #expect(API.bestVideo(sources, quality: 120, preference: .av1) == nil)
+    let dolby = try video("dvh1.05.06", quality: 126)
+    #expect(API.bestVideo([dolby], quality: 126, preference: .hevc)?.codecs == "dvh1.05.06")
+  }
+  @Test func videoMetadataKeepsCommentCountBeforeCommentListIsOpened() {
+    #expect(VideoCounts(["reply": 325]).replies == 325)
+    #expect(VideoCounts(["reply": 0]).replies == 0)
+    #expect(VideoCounts().replies == nil)
+  }
   @Test func shortCommentPagesKeepOpaqueCursorAndDeduplicatePinnedReplies() throws {
     let offset = #"{"type":3,"data":{"pn":2,"seen":"a+b/=\""}}"#
     let first = try CommentPage.parse([

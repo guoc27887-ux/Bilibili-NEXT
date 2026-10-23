@@ -49,6 +49,7 @@ struct MessageShare: Hashable {
   }
 }
 
+#if os(macOS)
 struct MessageShareCard: View {
   let share: MessageShare
   @Bindable var store: Store
@@ -101,3 +102,5 @@ struct MessageShareCard: View {
     }
   }
 }
+
+#endif

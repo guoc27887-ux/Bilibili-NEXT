@@ -22,6 +22,8 @@ actor PlaybackDiskCache: HTTPRangeStreaming {
   private let lease: Int32
   private var tracks: [URL: Track] = [:]
   private var workers: [URL: Task<Void, Never>] = [:]
+  private var startupRequests: [UUID: Task<HTTPRangeStreamResult, Error>] = [:]
+  private let streamDuringStartup: Bool
   private var started = false
   private var stopped = false
   private var storageLimited = false
@@ -32,8 +34,10 @@ actor PlaybackDiskCache: HTTPRangeStreaming {
 
   init(source: any HTTPRangeStreaming, videoURLs: Set<URL>, connections: Int,
        capacity: Int64 = 8 * 1_073_741_824, reserveSpace: Int64 = 1_073_741_824,
+       streamDuringStartup: Bool = false,
        root: URL = PlaybackTemporaryFiles.root) throws {
     self.source = source; self.videoURLs = videoURLs
+    self.streamDuringStartup = streamDuringStartup
     permits = VideoStreamPermits(limit: max(1, min(32, connections)))
     self.capacity = capacity; self.reserveSpace = reserveSpace
     prefetchConnections = max(1, min(32, connections))
@@ -56,9 +60,13 @@ actor PlaybackDiskCache: HTTPRangeStreaming {
   func stop() async {
     guard !stopped else { return }; stopped = true
     let tasks = tracks.values.flatMap { $0.running.values }
+    let startup = Array(startupRequests.values)
     workers.values.forEach { $0.cancel() }; workers = [:]
     tasks.forEach { $0.cancel() }
+    startup.forEach { $0.cancel() }
     for task in tasks { _ = try? await task.value }
+    for task in startup { _ = try? await task.value }
+    startupRequests = [:]
     tracks = [:]
     try? FileManager.default.removeItem(at: directory)
   }
@@ -91,6 +99,27 @@ actor PlaybackDiskCache: HTTPRangeStreaming {
       guard track.length == length else { throw HTTPRangeResponseError.rejectedBody }
     } else {
       tracks[url] = Track(id: UUID(), length: length, headers: headers, types: allowedContentTypes, cursor: first)
+    }
+    if streamDuringStartup && !started {
+      // Init boxes and short audio/video segments must reach AVPlayer immediately.
+      // Expanding an init read to a whole 1 MiB page delays every quality switch,
+      // and withholding chunks until the page completes can stall startup entirely.
+      // Remember the resume segment so later read-ahead starts around the playhead.
+      if expectedRange.start > 0 { tracks[url]?.cursor = first }
+      let id = UUID()
+      let request = Task { [source] in
+        try await source.stream(from: url, rangeHeader: rangeHeader, expectedRange: expectedRange,
+          expectedCompleteLength: length, headers: headers, allowedContentTypes: allowedContentTypes,
+          requiresContentLength: requiresContentLength, onResponse: onResponse, onChunk: onChunk)
+      }
+      startupRequests[id] = request
+      defer { startupRequests[id] = nil }
+      return try await withTaskCancellationHandler {
+        let result = try await request.value
+        try Task.checkCancellation()
+        guard !stopped else { throw CancellationError() }
+        return result
+      } onCancel: { request.cancel() }
     }
     for number in first...last {
       let lower = max(expectedRange.start, number * Self.pageSize)
@@ -209,8 +238,15 @@ actor PlaybackDiskCache: HTTPRangeStreaming {
     var failures = 0
     while !Task.isCancelled {
       guard !stopped, let track = tracks[url] else { break }
-      var next = track.cursor
-      while track.pages[next] != nil || track.running[next] != nil { next += 1 }
+      let pageCount = (track.length + Self.pageSize - 1) / Self.pageSize
+      var next = track.cursor % pageCount
+      var scanned: Int64 = 0
+      while track.pages[next] != nil || track.running[next] != nil {
+        next = (next + 1) % pageCount
+        scanned += 1
+        if scanned == pageCount { break }
+      }
+      guard scanned < pageCount else { break }
       tracks[url]?.cursor = next + 1
       guard next * Self.pageSize < track.length, !storageLimited else { break }
       do { _ = try await page(url, number: next, foreground: false); failures = 0 }

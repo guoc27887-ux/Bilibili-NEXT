@@ -37,6 +37,19 @@ private actor SlowPlayerConsumer {
   func wait() async { entered = true; await withCheckedContinuation { continuation = $0 } }
   func release() { continuation?.resume(); continuation = nil }
 }
+private struct StartupChunkFixture: HTTPRangeStreaming {
+  func stream(from url: URL, rangeHeader: String, expectedRange: HTTPByteRange,
+    expectedCompleteLength: Int64?, headers: [String: String], allowedContentTypes: Set<String>?,
+    requiresContentLength: Bool, onResponse: @escaping @Sendable (HTTPRangeStreamResponse) async throws -> Void,
+    onChunk: @escaping @Sendable (Data) async throws -> Void) async throws -> HTTPRangeStreamResult {
+    try await onResponse(HTTPRangeStreamResponse(contentRange: HTTPContentRange(start: expectedRange.start,
+      endInclusive: expectedRange.endInclusive, completeLength: expectedCompleteLength),
+      contentLength: expectedRange.length, contentType: "video/mp4"))
+    try await onChunk(Data(repeating: 7, count: 64))
+    try await Task.sleep(for: .seconds(30))
+    throw CDNIdleTimeout()
+  }
+}
 @Suite struct PlaybackDiskCacheTests {
   let url = URL(string: "https://fixture.test/media?secret=not-for-disk")!
   func read(_ cache: PlaybackDiskCache, _ start: Int64, _ end: Int64, length: Int64) async throws -> Data {
@@ -46,6 +59,51 @@ private actor SlowPlayerConsumer {
       onResponse: { _ in await output.header() }, onChunk: { await output.append($0) })
     #expect(await output.headers == 1)
     return await output.bytes
+  }
+  @Test func startupReadsOnlyRequestedBytesThenPrefetchesFromResumePosition() async throws {
+    let source = DiskFixture(), page = PlaybackDiskCache.pageSize, length = page * 4
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let cache = try PlaybackDiskCache(source: source, videoURLs: [url], connections: 1,
+      reserveSpace: 0, streamDuringStartup: true, root: root)
+    _ = try await read(cache, 0, 127, length: length)
+    _ = try await read(cache, 2 * page + 100, 2 * page + 199, length: length)
+    let startup = await source.calls
+    #expect(startup.map(\.length) == [128, 100])
+    #expect(await cache.statistics()["diskCacheBytes"] == 0)
+    await cache.start()
+    for _ in 0..<300 {
+      if await cache.statistics()["diskCacheComplete"] == 1 { break }
+      try await Task.sleep(for: .milliseconds(10))
+    }
+    #expect(await source.calls.dropFirst(2).map(\.start) == [2 * page, 3 * page, 0, page])
+    #expect(await cache.statistics()["diskCacheComplete"] == 1)
+    let calls = await source.calls.count
+    #expect(try await read(cache, 2 * page + 100, 2 * page + 199, length: length).count == 100)
+    #expect(await source.calls.count == calls)
+    await cache.stop(); try? FileManager.default.removeItem(at: root)
+  }
+  @Test func startupDeliversChunksBeforeWholeRangeAndCancelsOnSwitch() async throws {
+    let output = CacheOutput()
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    let cache = try PlaybackDiskCache(source: StartupChunkFixture(), videoURLs: [url], connections: 2,
+      reserveSpace: 0, streamDuringStartup: true, root: root)
+    let request = Task {
+      let range = try HTTPByteRange(start: 0, endInclusive: 999)
+      return try await cache.stream(from: url, rangeHeader: range.headerValue, expectedRange: range,
+        expectedCompleteLength: 2_000_000, headers: [:], allowedContentTypes: ["video/mp4"],
+        requiresContentLength: true, onResponse: { _ in await output.header() },
+        onChunk: { await output.append($0) })
+    }
+    for _ in 0..<100 {
+      if await output.bytes.count == 64 { break }
+      try await Task.sleep(for: .milliseconds(5))
+    }
+    #expect(await output.bytes.count == 64)
+    #expect(await output.headers == 1)
+    await cache.stop()
+    await #expect(throws: CancellationError.self) { try await request.value }
+    #expect(!FileManager.default.fileExists(atPath: await cache.directory.path))
+    try? FileManager.default.removeItem(at: root)
   }
   @Test func prefetchContinuesToEndAndServesPartialRangesWithoutAnotherDownload() async throws {
     let source = DiskFixture(), length: Int64 = 2_300_000

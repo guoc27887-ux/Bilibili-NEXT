@@ -8,6 +8,7 @@ struct DanmakuFilteringControls: View {
   @AppStorage("danmakuAvoidSubtitles") private var subtitles = true
   @AppStorage("danmakuDeduplicate") private var deduplicate = false
   @AppStorage("danmakuBlockedWords") private var blocked = ""
+  @AppStorage("danmakuPersonAvoidance") private var personAvoidance = false
   var body: some View {
     VStack(alignment: .leading, spacing: 12) {
       toggle("滚动弹幕", $scrolling)
@@ -16,6 +17,9 @@ struct DanmakuFilteringControls: View {
       toggle("彩色弹幕", $colored)
       Divider()
       toggle("保留底部字幕区域", $subtitles)
+      #if os(macOS)
+      toggle("人物防挡", $personAvoidance)
+      #endif
       toggle("合并短时间内重复弹幕", $deduplicate)
       Text("屏蔽词 · 每行一个").font(.caption).foregroundStyle(.secondary)
       TextEditor(text: $blocked).font(.body).frame(height: 64)

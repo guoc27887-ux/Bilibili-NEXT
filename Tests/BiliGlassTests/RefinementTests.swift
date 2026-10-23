@@ -254,6 +254,29 @@ private final class PendingProtocol: URLProtocol, @unchecked Sendable {
     #expect(comments.submissionStatus?.contains("尚未返回") == true)
     #expect(comments.items.isEmpty)
   }
+  @Test @MainActor func commentCountDistinguishesUnknownZeroAndFailedRefresh() async throws {
+    let comments = Comments(), api = api()
+    #expect(!comments.hasLoadedCount)
+    comments.loadIfNeeded(aid: 1, api: api)
+    #expect(!comments.hasLoadedCount)
+    let nav = try await nextRequest()
+    nav.finish(#"{"code":0,"data":{"wbi_img":{"img_url":"https://i0.hdslb.com/0123456789abcdef0123456789abcdef.png","sub_url":"https://i0.hdslb.com/abcdef0123456789abcdef0123456789.png"}}}"#)
+    let first = try await nextRequest()
+    first.finish(#"{"code":0,"data":{"cursor":{"is_end":true,"all_count":0},"replies":[]}}"#)
+    for _ in 0..<200 where comments.loading { try await Task.sleep(for: .milliseconds(2)) }
+    #expect(comments.hasLoadedCount)
+    #expect(comments.count == 0)
+    comments.load(aid: 1, api: api)
+    let refresh = try await nextRequest()
+    refresh.finish(#"{"code":-500,"message":"fixture unavailable"}"#)
+    for _ in 0..<200 where comments.loading { try await Task.sleep(for: .milliseconds(2)) }
+    #expect(comments.hasLoadedCount)
+    #expect(comments.count == 0)
+    #expect(comments.error != nil)
+    comments.loadIfNeeded(aid: 2, api: api)
+    #expect(!comments.hasLoadedCount)
+    comments.stop()
+  }
   @Test @MainActor func failedRefreshKeepsCommentsAndReappearingViewDoesNotReload() async throws {
     let comments = Comments(), api = api()
     comments.loadIfNeeded(aid: 1, api: api)

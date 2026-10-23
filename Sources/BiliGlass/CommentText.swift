@@ -1,4 +1,8 @@
+#if os(macOS)
 import AppKit
+#else
+import UIKit
+#endif
 import SwiftUI
 
 struct CommentEmote: Hashable, Sendable {
@@ -22,6 +26,14 @@ struct CommentEmote: Hashable, Sendable {
       result[token] = CommentEmote(token: token, url: imageURL, large: size == 2)
     }
     return result
+  }
+  static func privateMessages(_ raw: Any?) -> [String: CommentEmote] {
+    let rows = raw as? [[String: Any]] ?? []
+    let entries = rows.reduce(into: [String: [String: Any]]()) { result, row in
+      guard let token = row["text"] as? String else { return }
+      result[token] = ["url": row["url"] ?? "", "meta": ["size": row["size"] ?? 1]]
+    }
+    return parse(entries)
   }
 }
 
@@ -72,15 +84,20 @@ struct CommentTextContent: Hashable, Sendable {
 /// A single native Text keeps wrapping and selection; no web view or per-frame timer.
 struct CommentText: View {
   let content: CommentTextContent
+  var copyTitle = "复制评论"
   @State private var images: [URL: CGImage] = [:]
   @ScaledMetric(relativeTo: .body) private var smallSize = 20.0
   @ScaledMetric(relativeTo: .body) private var largeSize = 40.0
   var body: some View {
     inlineText.font(.body).textSelection(.enabled).accessibilityLabel(content.message)
       .contextMenu {
-        Button("复制评论") {
+        Button(copyTitle) {
+          #if os(macOS)
           NSPasteboard.general.clearContents()
           NSPasteboard.general.setString(content.message, forType: .string)
+          #else
+          UIPasteboard.general.string = content.message
+          #endif
         }
       }
       .task(id: content) {
@@ -111,8 +128,14 @@ struct CommentText: View {
         guard let image = images[emote.url] else { return Text("\(accumulated)\(Text(verbatim: emote.token))") }
         let size = emote.large ? largeSize : smallSize
         let ratio = min(2, max(0.5, Double(image.width) / Double(max(1, image.height))))
+        #if os(macOS)
         let icon = NSImage(cgImage: image, size: NSSize(width: size * ratio, height: size))
         let attachment = Text(Image(nsImage: icon)).baselineOffset(emote.large ? -8 : -4)
+        #else
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: size * ratio, height: size))
+        let icon = renderer.image { _ in UIImage(cgImage: image).draw(in: CGRect(x: 0, y: 0, width: size * ratio, height: size)) }
+        let attachment = Text(Image(uiImage: icon)).baselineOffset(emote.large ? -8 : -4)
+        #endif
         return Text("\(accumulated)\(attachment)")
       }
     }

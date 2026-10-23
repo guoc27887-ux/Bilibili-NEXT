@@ -79,6 +79,7 @@ struct FullscreenPlayerContent: View {
       NativePlayer(playback:store.playback,items:store.danmaku.items,enabled:store.danmaku.enabled,showsNativeControls:false,fullscreen:true,toggleFullscreen:close)
         .ignoresSafeArea()
       PlaybackStatusOverlay(playback: store.playback)
+      SubtitleOverlay(extras: store.extras, playback: store.playback, fullscreen: true)
       if store.playback.isBoosting {
         Text(store.playback.boostLabel).padding(12).glassEffect(.regular, in: .capsule).frame(maxHeight: .infinity, alignment: .top).padding(.top, 92).allowsHitTesting(false)
       }
@@ -89,6 +90,11 @@ struct FullscreenPlayerContent: View {
           Spacer(minLength:0)
           Toggle("弹幕",isOn:$store.danmaku.enabled).toggleStyle(.switch).fixedSize()
           DanmakuSettingsButton()
+          Menu("字幕") {
+            Button("关闭字幕") { Task { await store.extras.selectSubtitle("", api: store.api) } }
+            ForEach(store.extras.subtitles) { track in Button(track.title) { Task { await store.extras.selectSubtitle(track.id, api: store.api) } } }
+          }
+          if store.hasNextVideo { Button { store.playNext() } label: { Image(systemName: "forward.end") }.help("下一集") }
           Button { store.playback.showsDetails.toggle() } label: { Image(systemName: "waveform.path.ecg") }.help("播放详情").accessibilityLabel("播放详情")
           if let streams = store.playback.streams {
             Menu {
@@ -101,7 +107,7 @@ struct FullscreenPlayerContent: View {
         }.buttonStyle(.glass).padding(14).glassEffect(.regular,in:.rect(cornerRadius:22))
           .onHover { hoveringControls = $0; if $0 { wake() } }
         Spacer()
-        PlayerControls(playback:store.playback,fullscreen:true,toggleFullscreen:close)
+        PlayerControls(playback:store.playback,fullscreen:true,toggleFullscreen:close,extras:store.extras)
           .frame(maxWidth:1000)
           .onHover { hoveringControls = $0; if $0 { wake() } }
       }.padding(24).opacity(visible ? 1:0).allowsHitTesting(visible)

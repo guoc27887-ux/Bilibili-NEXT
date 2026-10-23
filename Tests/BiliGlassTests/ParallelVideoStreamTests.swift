@@ -98,7 +98,7 @@ private actor RecoverableRangeFixture: HTTPRangeStreaming {
     let permits = VideoStreamPermits(limit: 24, recoveryInterval: .zero)
     await permits.backOff()
     #expect(await permits.statistics()["effectiveConnections"] == 12)
-    for _ in 0..<300 { try await permits.acquire(); await permits.release(succeeded: true) }
+    for _ in 0..<12 { try await permits.acquire(); await permits.release(succeeded: true) }
     #expect(await permits.statistics()["effectiveConnections"] == 24)
     #expect(await permits.statistics()["activeVideoRequests"] == 0)
   }
@@ -152,6 +152,17 @@ private actor RecoverableRangeFixture: HTTPRangeStreaming {
     #expect(responses.count == 1)
     #expect(responses[0].contentLength == UInt64(length))
     #expect(responses[0].contentRange.endInclusive == length - 1)
+  }
+  @Test func shortStartupSegmentUsesConfiguredLanesWithoutWaitingForPrefetch() async throws {
+    let source = RangeFixture(delay: .milliseconds(40), uniform: true)
+    let stream = ParallelVideoStream(connections: 24, source: source)
+    let output = StreamOutput()
+    let length: Int64 = 3 * 1024 * 1024
+    _ = try await read(stream, output, length: length)
+    #expect(await source.peak == 24)
+    #expect(await output.bytes == Data(repeating: 7, count: Int(length)))
+    #expect(await output.responses.count == 1)
+    #expect(await source.active == 0)
   }
   @Test func oneConnectionKeepsTheStreamingPath() async throws {
     let source = RangeFixture()

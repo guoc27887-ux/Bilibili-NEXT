@@ -23,3 +23,12 @@ THIRD_PARTY.md. New dependencies need a clear compatible license and provenance.
 Release packaging uses `Scripts/package-release.sh` after all source changes are
 committed. It creates signed-app ZIP, DMG, committed-source ZIP and SHA-256 sums.
 Use your own `SIGNING_IDENTITY` as appropriate. This does not perform notarization.
+
+For the iOS / iPadOS preview, use Xcode 27+ (deployment target iOS 26+), clone the
+whole repository, and run `Scripts/build-ios.sh` for an unsigned simulator build.
+Open `Apps/iOS/BilibiliNEXT.xcodeproj` and use the shared `BilibiliNEXT` scheme for
+development and UI tests. Device signing uses your own `DEVELOPMENT_TEAM`; do not
+commit provisioning profiles, certificates, local account data or Xcode user state.
+See `IOS_STATUS.md` for current support and validation limits. Regenerate the
+project with `python3 Scripts/generate-ios-project.py` after changing its source list.
+See `Assets/ICON.md` for SVG icon editing and resource generation.

@@ -4,10 +4,18 @@ import BiliNetworking
 import BiliPlayback
 import SwiftUI
 
+struct PlaybackResume {
+  let position: Double
+  var playing: Bool
+}
+
 @MainActor @Observable final class Playback {
   let player = AVPlayer()
+  #if os(macOS)
   @ObservationIgnored let specialDanmakuCache = SpecialDanmakuCache()
+  @ObservationIgnored let personAvoidance = PersonAvoidance()
   @ObservationIgnored weak var nativeView: NativeVideoView?
+  #endif
   private var bridge = DASHToHLSBridge()
   private var videoTransport: ParallelVideoStream?
   private var diskCache: PlaybackDiskCache?
@@ -37,6 +45,7 @@ import SwiftUI
   var isBoosting = false
   var temporarySpeed: Float = 3
   var showsDetails = false
+  var showsSystemControls = false
   var isFullscreen = false
   var boostLabel: String { "\(Double(temporarySpeed).formatted())× 临时倍速" + (isOffline ? "" : " · 在线播放") }
   var isOffline = false
@@ -44,6 +53,8 @@ import SwiftUI
   var connectionOverride: Int?
   var localDanmaku: URL?
   private(set) var generation = UUID()
+  private(set) var pendingResume: PlaybackResume?
+  private(set) var requestedQuality: Int?
   private var task: Task<Void, Never>?
   private var stallMonitor: Task<Void, Never>?
   private var automaticRecoveries = 0
@@ -55,14 +66,29 @@ import SwiftUI
   private var sizeObservation: NSKeyValueObservation?
   private var timeObserver: Any?
   private var controlObservation: NSKeyValueObservation?
+  private var endObserver: NSObjectProtocol?
   var onProgress: ((String, Int, Double, Bool) -> Void)?
+  var onEnded: (() -> Void)?
+  func seek(to seconds: Double) {
+    guard seconds.isFinite, seconds >= 0 else { return }
+    player.seek(to: CMTime(seconds: min(seconds, max(0, durationSeconds)), preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+  }
   func focusPlayer() {
+    #if os(macOS)
     DispatchQueue.main.async { [weak self] in
       guard let view = self?.nativeView, !view.isHidden, let window = view.window, window.attachedSheet == nil else { return }
       window.makeFirstResponder(view)
     }
+    #endif
   }
   func togglePlayback() {
+    if pendingResume != nil {
+      pendingResume?.playing.toggle()
+      if pendingResume?.playing == true, player.currentItem?.status == .readyToPlay {
+        player.playImmediately(atRate: speed)
+      } else { player.pause() }
+      return
+    }
     guard player.currentItem != nil else { return }
     if player.rate != 0 { player.pause(); saveCurrentProgress(); return }
     let duration = player.currentItem?.duration.seconds ?? 0
@@ -79,6 +105,12 @@ import SwiftUI
   }
   init() {
     player.preventsDisplaySleepDuringVideoPlayback = true
+    endObserver = NotificationCenter.default.addObserver(forName: AVPlayerItem.didPlayToEndTimeNotification, object: nil, queue: .main) { [weak self] notification in
+      MainActor.assumeIsolated {
+        guard let self, let item = notification.object as? AVPlayerItem, item === self.player.currentItem else { return }
+        self.saveCurrentProgress(); self.onEnded?()
+      }
+    }
     controlObservation = player.observe(\.timeControlStatus, options: [.initial, .new]) { [weak self] _, _ in
       Task { @MainActor in
         guard let self else { return }
@@ -90,7 +122,7 @@ import SwiftUI
       forInterval: CMTime(seconds: 0.25, preferredTimescale: 600), queue: .main
     ) { [weak self] time in
       MainActor.assumeIsolated {
-        guard let self, time.seconds.isFinite else { return }
+        guard let self, self.pendingResume == nil, time.seconds.isFinite else { return }
         if abs(time.seconds - self.lastControlTime) >= 0.01 {
           self.lastControlTime = time.seconds
           self.positionSeconds = max(0, time.seconds)
@@ -111,7 +143,7 @@ import SwiftUI
     let endMargin = min(10, Double(duration) * 0.1)
     return saved >= Double(duration) - endMargin ? 0 : saved
   }
-  func open(_ bvid: String, api: API, quality: Int? = nil, initialCID: Int? = nil, resume: @escaping (Int) -> Double) {
+  func open(_ bvid: String, api: API, quality: Int? = nil, initialCID: Int? = nil, restoring: PlaybackResume? = nil, resume: @escaping (Int) -> Double) {
     stop()
     automaticRecoveries = 0
     let token = generation
@@ -132,8 +164,8 @@ import SwiftUI
         selectedCID = page.id
         try await load(
           api: api, bvid: bvid, cid: page.id, quality: quality,
-          position: Self.restoredPosition((UserDefaults.standard.object(forKey: "rememberPosition") as? Bool ?? true) ? resume(page.id) : 0, duration: page.duration > 0 ? page.duration : d.pages.count == 1 ? d.video.duration : 0),
-          playing: UserDefaults.standard.object(forKey: "autoPlay") as? Bool ?? true, token: token)
+          position: restoring?.position ?? Self.restoredPosition((UserDefaults.standard.object(forKey: "rememberPosition") as? Bool ?? true) ? resume(page.id) : 0, duration: page.duration > 0 ? page.duration : d.pages.count == 1 ? d.video.duration : 0),
+          playing: restoring?.playing ?? (UserDefaults.standard.object(forKey: "autoPlay") as? Bool ?? true), token: token)
       } catch { fail(error, token: token) }
     }
   }
@@ -154,17 +186,25 @@ import SwiftUI
     }
   }
   func selectQuality(_ qn: Int, api: API, force: Bool = false) {
-    guard let d = detail, force || qn != selectedQuality || error != nil else { return }
-    let position = max(0, player.currentTime().seconds.isFinite ? player.currentTime().seconds : 0)
-    let wasPlaying = player.rate != 0 || error != nil || loading
+    guard let d = detail, !isOffline,
+      force || qn != (requestedQuality ?? selectedQuality) || error != nil else { return }
+    // The old item is already detached during a switch. Keep its position and
+    // playback intent if another quality (or retry) supersedes that request.
+    let time = player.currentTime().seconds
+    let resume = pendingResume ?? PlaybackResume(
+      position: max(0, time.isFinite ? time : positionSeconds),
+      playing: player.rate != 0 || player.timeControlStatus == .waitingToPlayAtSpecifiedRate)
     beginChange()
+    pendingResume = resume
+    requestedQuality = qn
+    positionSeconds = resume.position
     let token = generation
     let cid = selectedCID
     task = Task {
       do {
         try await load(
-          api: api, bvid: d.video.bvid, cid: cid, quality: qn, position: position,
-          playing: wasPlaying, token: token)
+          api: api, bvid: d.video.bvid, cid: cid, quality: qn, position: resume.position,
+          playing: resume.playing, token: token)
       } catch { fail(error, token: token) }
     }
   }
@@ -172,6 +212,9 @@ import SwiftUI
     api: API, bvid: String, cid: Int, quality: Int?, position: Double, playing: Bool, token: UUID
   ) async throws {
     try Task.checkCancellation()
+    guard token == generation else { throw CancellationError() }
+    if pendingResume == nil { pendingResume = PlaybackResume(position: position, playing: playing) }
+    positionSeconds = position
     let loadStarted = ContinuousClock.now
     func elapsed() -> Int {
       let d = loadStarted.duration(to: .now).components
@@ -186,6 +229,7 @@ import SwiftUI
     let preferred = UserDefaults.standard.integer(forKey: "quality")
     let qn =
       quality ?? (s.videos.contains { $0.id == preferred } ? preferred : s.videos.first?.id ?? 0)
+    requestedQuality = qn
     guard let original = API.bestVideo(s.videos, quality: qn) else {
       throw BiliError(text: "此清晰度已不可用，请重试")
     }
@@ -196,13 +240,14 @@ import SwiftUI
     let videoURLs = Set(s.videos.flatMap(\.urlCandidates))
     let cache = (UserDefaults.standard.object(forKey: "continuousPreload") as? Bool ?? true)
       ? try? PlaybackDiskCache(source: cdn, videoURLs: videoURLs, connections: connections,
-          capacity: Int64(max(1, min(32, UserDefaults.standard.object(forKey: "preloadDiskGB") as? Int ?? 8))) * 1_073_741_824) : nil
+          capacity: Int64(max(1, min(32, UserDefaults.standard.object(forKey: "preloadDiskGB") as? Int ?? 8))) * 1_073_741_824,
+          streamDuringStartup: true) : nil
     diskCache = cache
     let transport = ParallelVideoStream(
       connections: connections, videoURLs: videoURLs, source: cache ?? cdn as any HTTPRangeStreaming)
     videoTransport = transport
     bridge = DASHToHLSBridge(mediaStreamer: transport)
-    let others = s.videos.filter { $0.id == qn && $0.codecs != original.codecs }
+    let others = API.videoCandidates(s.videos, quality: qn).filter { $0.codecs != original.codecs }
     var candidates = [original] + others
     // A refreshed session also gives a transient network failure a second chance.
     if candidates.count == 1 { candidates.append(original) }
@@ -262,9 +307,15 @@ import SwiftUI
         install(item, token: token, position: 0, playing: playing, managedStartup: true)
         loadingMessage = "正在缓冲画面"
         try await awaitStartup(item, token: token, playing: playing)
+        try Task.checkCancellation()
+        guard token == generation, player.currentItem === item else { throw CancellationError() }
         startupMilliseconds["playing"] = elapsed()
         await cache?.start()
+        try Task.checkCancellation()
+        guard token == generation, player.currentItem === item else { throw CancellationError() }
         item.preferredForwardBufferDuration = UserDefaults.standard.object(forKey: "bufferSeconds") as? Double ?? 15
+        pendingResume = nil
+        requestedQuality = nil
         loading = false
         error = nil
         if persistQualityPreference { UserDefaults.standard.set(video.id, forKey: "quality") }
@@ -345,8 +396,18 @@ import SwiftUI
         throw BiliError(text: "系统播放器无法读取此视频流")
       }
       if item.status == .readyToPlay {
-        if !playing && item.presentationSize.width > 0 { return }
+        let wantsPlayback = pendingResume?.playing ?? playing
+        if !wantsPlayback && item.presentationSize.width > 0 { return }
         let time = player.currentTime().seconds
+        if wantsPlayback, player.timeControlStatus == .waitingToPlayAtSpecifiedRate,
+          began.duration(to: .now) >= .seconds(1),
+          Self.bufferedAhead(time: time, ranges: item.loadedTimeRanges.map {
+            ($0.timeRangeValue.start.seconds, $0.timeRangeValue.duration.seconds)
+          }) >= max(2, Double(speed) * 2) {
+          // Startup precedes monitorStalls. A fixed-quality HLS item can wait on
+          // its throughput estimate even after the requested position is buffered.
+          player.playImmediately(atRate: speed)
+        }
         if time.isFinite && player.timeControlStatus == .playing {
           if let initialTime, time > initialTime + 0.12, item.presentationSize.width > 0 { return }
           if initialTime == nil { initialTime = time }
@@ -409,7 +470,7 @@ import SwiftUI
             if duration.isFinite, duration > 0 { self.durationSeconds = duration }
             if !managedStartup { self.loading = false }
             Task { await self.inspectFormat(item, token: token) }
-            if playing { self.player.playImmediately(atRate: self.speed) }
+            if self.pendingResume?.playing ?? playing { self.player.playImmediately(atRate: self.speed) }
           }
         case .failed:
           if !managedStartup { self.loading = false }
@@ -455,7 +516,7 @@ import SwiftUI
       try? await Task.sleep(for: .milliseconds(300))
     }
   }
-  func openLocal(_ url: URL, video: Video, cid: Int = 0, sidecar: URL? = nil) {
+  func openLocal(_ url: URL, video: Video, cid: Int = 0, sidecar: URL? = nil, restoring: PlaybackResume? = nil) {
     stop()
     detail = Detail(video: video, description: "", pages: [])
     streams = nil
@@ -472,8 +533,8 @@ import SwiftUI
         try Task.checkCancellation()
         guard token == generation else { return }
         let item = AVPlayerItem(url: compatible)
-        install(item, token: token, position: 0, playing: true, managedStartup: true)
-        try await awaitStartup(item, token: token, playing: true)
+        install(item, token: token, position: restoring?.position ?? 0, playing: restoring?.playing ?? true, managedStartup: true)
+        try await awaitStartup(item, token: token, playing: restoring?.playing ?? true)
         loading = false
         sourceFormat = "本地缓存"
       } catch {
@@ -492,8 +553,8 @@ import SwiftUI
       if let requestedBVID { open(requestedBVID, api: api, resume: { _ in 0 }) }
       return
     }
-    if selectedQuality != 0 {
-      selectQuality(selectedQuality, api: api, force: true)
+    if let quality = requestedQuality ?? (selectedQuality != 0 ? selectedQuality : nil) {
+      selectQuality(quality, api: api, force: true)
     } else {
       open(d.video.bvid, api: api, resume: { _ in 0 })
     }
@@ -546,12 +607,13 @@ import SwiftUI
     error = e.localizedDescription
   }
   func saveCurrentProgress() {
-    guard let detail, player.currentItem != nil else { return }
+    guard pendingResume == nil, let detail, player.currentItem != nil else { return }
     let seconds = player.currentTime().seconds
     guard seconds.isFinite, seconds > 0 else { return }
     onProgress?(detail.video.bvid, selectedCID, seconds, true)
   }
   private func beginChange() {
+    showsSystemControls = false
     saveCurrentProgress()
     endTemporarySpeed()
     task?.cancel()
@@ -561,6 +623,8 @@ import SwiftUI
     buffering = false
     failureCode = ""
     generation = UUID()
+    pendingResume = nil
+    requestedQuality = nil
     lastControlTime = -1; lastSavedTime = -1; positionSeconds = 0; durationSeconds = 0; isPlaying = false
     statusObservation = nil
     sizeObservation = nil
@@ -582,10 +646,15 @@ import SwiftUI
     diskCache = nil
   }
   func stop() {
+    showsSystemControls = false
+    #if os(macOS)
+    personAvoidance.stop()
+    #endif
     beginChange()
     loading = false
   }
   isolated deinit {
+    if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
     task?.cancel()
     stallMonitor?.cancel()
     asset?.stop()
@@ -594,19 +663,28 @@ import SwiftUI
   }
 }
 
-@MainActor final class NativeVideoView: AVPlayerView {
+#if os(macOS)
+@MainActor final class NativeVideoView: AVPlayerView, @preconcurrency AVPlayerViewPictureInPictureDelegate {
   let danmaku = DanmakuView(frame: .zero)
   var toggleFullscreen: (() -> Void)?
   var togglePlayback: (() -> Void)?
   var keyboard: PlayerKeyboard?
+  var onVideoLayout: (() -> Void)?
+  var onPictureInPicture: (() -> Void)?
   private var wheelMonitor: Any?
   override init(frame: NSRect) {
     super.init(frame: frame)
+    pictureInPictureDelegate = self
     let doubleClick = NSClickGestureRecognizer(target:self,action:#selector(toggleByDoubleClick(_:)))
     doubleClick.numberOfClicksRequired = 2
     addGestureRecognizer(doubleClick)
   }
   @objc private func toggleByDoubleClick(_ gesture:NSClickGestureRecognizer) { toggleFullscreen?() }
+  func playerViewDidStartPicture(inPicture playerView: AVPlayerView) { onPictureInPicture?() }
+  func playerViewDidStopPicture(inPicture playerView: AVPlayerView) { onPictureInPicture?() }
+  func playerViewShouldAutomaticallyDismissAtPicture(inPictureStart playerView: AVPlayerView) -> Bool { false }
+  func playerView(_ playerView: AVPlayerView, failedToStartPictureInPictureWithError error: Error) { onPictureInPicture?() }
+  func playerView(_ playerView: AVPlayerView, restoreUserInterfaceForPictureInPictureStopWithCompletionHandler completionHandler: (Bool) -> Void) { completionHandler(true) }
   func attachDanmaku() {
     guard let overlay = contentOverlayView else { return }
     if danmaku.superview !== overlay { overlay.addSubview(danmaku) }
@@ -664,6 +742,7 @@ import SwiftUI
   override func layout() {
     super.layout()
     attachDanmaku()
+    onVideoLayout?()
   }
 }
 struct NativePlayer: NSViewRepresentable {
@@ -682,6 +761,7 @@ struct NativePlayer: NSViewRepresentable {
     playback.nativeView = v
     v.toggleFullscreen = toggleFullscreen
     v.togglePlayback = { [weak playback] in playback?.togglePlayback() }
+    v.onPictureInPicture = { [weak playback] in playback?.showsSystemControls = false }
     v.keyboard = PlayerKeyboard(view: v, playback: playback)
     v.attachDanmaku()
     v.controlsStyle = showsNativeControls ? .floating : .none
@@ -701,6 +781,7 @@ struct NativePlayer: NSViewRepresentable {
     return v
   }
   func updateNSView(_ view: NativeVideoView, context: Context) {
+    view.controlsStyle = (showsNativeControls || playback.showsSystemControls) ? .floating : .none
     let active = !playback.isFullscreen || fullscreen
     let wasHidden = view.isHidden
     view.isHidden = !active
@@ -719,6 +800,7 @@ struct NativePlayer: NSViewRepresentable {
     view.danmaku.enabled = enabled
     view.danmaku.isHidden = !enabled
     view.needsLayout = true
+    playback.personAvoidance.attach(view, player: playback.player)
   }
   static func dismantleNSView(_ view: NativeVideoView, coordinator: Coordinator) {
     view.keyboard?.stop()
@@ -728,3 +810,5 @@ struct NativePlayer: NSViewRepresentable {
     view.player = nil
   }
 }
+
+#endif

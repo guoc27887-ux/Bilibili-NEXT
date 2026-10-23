@@ -1,9 +1,26 @@
-# Bilibili NEXT icon
+# Bilibili NEXT icons
 
-Generated and refined with the built-in imagegen tool. Master: `Bilibili-NEXT-icon.png` (transparent exterior); exported with Core Graphics to the standard macOS 16–1024 px icon set and `Scripts/AppIcon.icns`.
+The editable masters are hand-authored, self-contained SVG files:
 
-Refinement prompt (1.0.1):
+- [macOS](Bilibili-NEXT-macOS.svg): an inset rounded tile with transparent outer margins.
+- [iOS / iPadOS](Bilibili-NEXT-iOS.svg): an opaque, full-bleed square; the system applies its icon mask.
 
-Refine this macOS Bilibili NEXT app icon. Preserve the recognizable pink rounded-square, white TV with two antennae, and pink play triangle. Crucial repair: exterior must be perfectly clean actual transparency with no red speckles, no colored halo, no ghost pixels anywhere outside the smooth rounded square. Reduce the inflated toy-like bevels: use a thinner white TV outline, a crisp simple play triangle and restrained frosted-glass relief. Keep the symbol symmetric and balanced, visibly center it vertically with antennae included. One soft upper-left highlight, soft rose pink gradient, no thick concentric frames. Clean native macOS Liquid Glass quality, excellent small-icon legibility. Centered tile occupies 82% of a square canvas. No text or watermark. Output square PNG with true transparent exterior.
+Both use the same white television and next-video symbol on solid pink (`#F45183`).
+There are no gradients, shadows, raster images, fonts or external resources.
+The artwork is included under the repository's MIT license and does not imply official Bilibili endorsement.
 
-The 1.0.0 icon is retained in the Git history. The final icon is an independent client symbol; it does not imply official Bilibili endorsement.
+## Regenerate application resources
+
+On macOS, install `librsvg` if needed (`brew install librsvg`), then run:
+
+```sh
+Scripts/build-icons.sh
+```
+
+This updates `Assets/Bilibili-NEXT-icon.png`, `Scripts/AppIcon.icns`, and
+`Apps/iOS/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png`.
+Each macOS icon size is rendered directly from the SVG. Generated resources are
+checked in, so ordinary app builds do not require librsvg. Native app bundles
+use ICNS / PNG resources; the SVG files remain the editable sources.
+
+The earlier generated artwork is preserved in Git history.

@@ -94,6 +94,7 @@ struct AccountHistoryEntry: Identifiable {
   }
 }
 
+#if os(macOS)
 struct HistoryPage: View {
   @Bindable var store: Store
   @AppStorage("historySource") private var source = "account"
@@ -170,3 +171,5 @@ struct HistoryPage: View {
     }
   }
 }
+
+#endif

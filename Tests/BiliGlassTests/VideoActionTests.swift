@@ -54,6 +54,108 @@ private func relationResponse(_ request: URLRequest, liked: Bool = false, coins:
 }
 
 @Suite(.serialized) struct VideoActionTests {
+  @Test func appCoinAuthorizationRejectsOtherAccountsAndIncompleteTokens() throws {
+    let now = Date(timeIntervalSince1970: 1000)
+    let payload: [String: Any] = ["token_info": ["mid": 42, "access_token": "fixture-token", "expires_in": 3600]]
+    let token = try AppCoinAuthorization.parse(payload, expectedAccount: "42", now: now)
+    #expect(token.isValid(for: "42", now: now))
+    #expect(!token.isValid(for: "43", now: now))
+    #expect(!token.isValid(for: "42", now: now.addingTimeInterval(3590)))
+    #expect(throws: BiliError.self) { try AppCoinAuthorization.parse(payload, expectedAccount: "43", now: now) }
+    #expect(throws: BiliError.self) {
+      try AppCoinAuthorization.parse(["mid": 42, "access_token": "fixture-token"], expectedAccount: "42", now: now)
+    }
+  }
+  @Test @MainActor func appCoinsUseOnlyTheBoundTokenAndDoNotSendWebCookies() async throws {
+    let api = api()
+    api.cookies["DedeUserID"] = "42"
+    api.appCoinAuthorization = .init(accountID: 42, accessToken: "fixture-token", expires: .distantFuture)
+    ActionProtocol.handler = { request in
+      #expect(request.url?.host == "app.bilibili.com")
+      #expect(request.url?.path == "/x/v2/view/coin/add")
+      #expect(request.url?.query == nil)
+      #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
+      let body = form(request)
+      #expect(body["access_key"] == "fixture-token")
+      #expect(body["multiply"] == "1" && body["select_like"] == "0")
+      #expect(body["csrf"] == nil && body["sign"]?.count == 32)
+      return .init(json: #"{"code":0,"data":{"like":false}}"#)
+    }
+    #expect(try await !api.addVideoCoins(aid: 123, amount: 1, alsoLike: false))
+  }
+  @Test @MainActor func appCoinTimeoutDoesNotRetryOrFallBackToWeb() async {
+    let api = api(), log = RequestLog()
+    api.cookies["DedeUserID"] = "42"
+    api.appCoinAuthorization = .init(accountID: 42, accessToken: "fixture-token", expires: .distantFuture)
+    ActionProtocol.handler = { request in log.append(["path": request.url!.path]); throw URLError(.timedOut) }
+    do { _ = try await api.addVideoCoins(aid: 123, amount: 1, alsoLike: false); Issue.record("Expected timeout") }
+    catch { #expect((error as? URLError)?.code == .timedOut) }
+    #expect(log.values.count == 1)
+  }
+  @Test @MainActor func confirmedAppCoinDoesNotInventAnAttachedLike() async throws {
+    let api = api()
+    api.cookies["DedeUserID"] = "42"
+    api.appCoinAuthorization = .init(accountID: 42, accessToken: "fixture-token", expires: .distantFuture)
+    ActionProtocol.handler = { _ in .init(json: #"{"code":0}"#) }
+    #expect(try await !api.addVideoCoins(aid: 123, amount: 1, alsoLike: true))
+  }
+  @Test @MainActor func changedAccountCannotApplyAnOldAppCoinResponse() async {
+    let api = api()
+    api.cookies["DedeUserID"] = "42"
+    api.appCoinAuthorization = .init(accountID: 42, accessToken: "fixture-token", expires: .distantFuture)
+    ActionProtocol.handler = { _ in .init(json: #"{"code":0,"data":{"like":false}}"#, delay: 0.08) }
+    let operation = Task { try await api.addVideoCoins(aid: 123, amount: 1, alsoLike: false) }
+    try? await Task.sleep(for: .milliseconds(20))
+    api.authenticationGeneration = UUID()
+    do { _ = try await operation.value; Issue.record("Expected stale response cancellation") }
+    catch { #expect(error is CancellationError) }
+  }
+  @Test @MainActor func expiredAppCoinAuthorizationStopsBeforeAnyWrite() async {
+    let api = api(), log = RequestLog()
+    api.cookies["DedeUserID"] = "42"
+    api.appCoinAuthorization = .init(accountID: 42, accessToken: "fixture-token", expires: .distantPast)
+    ActionProtocol.handler = { request in log.append(form(request)); return .init(json: #"{"code":0,"data":{"like":false}}"#) }
+    do { _ = try await api.addVideoCoins(aid: 123, amount: 1, alsoLike: false); Issue.record("Expected expired authorization") }
+    catch { #expect((error as? BiliError)?.code == -101) }
+    #expect(log.values.isEmpty)
+  }
+  @Test @MainActor func anotherAccountsTokenIsNeverAttachedToCoinRequest() async throws {
+    let api = api()
+    api.cookies["DedeUserID"] = "42"
+    api.appCoinAuthorization = .init(accountID: 43, accessToken: "other-account-token", expires: .distantFuture)
+    ActionProtocol.handler = { request in
+      #expect(request.url?.path == "/x/web-interface/coin/add")
+      #expect(form(request)["access_key"] == nil)
+      return .init(json: #"{"code":0,"data":{"like":false}}"#)
+    }
+    _ = try await api.addVideoCoins(aid: 123, amount: 1, alsoLike: false)
+  }
+  @Test @MainActor func appAuthorizationRejectsAnUntrustedQRDestination() async {
+    ActionProtocol.handler = { request in
+      #expect(request.url?.host == "passport.bilibili.com")
+      #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
+      return .init(json: #"{"code":0,"data":{"auth_code":"fixture","url":"https://bilibili.com.example.org/login"}}"#)
+    }
+    do { _ = try await api().appCoinQRCode(); Issue.record("Expected untrusted QR URL rejection") }
+    catch { #expect(error is BiliError) }
+  }
+  @Test func folderPrivacyUsesTheLowBitInsteadOfTheDefaultFolderFlag() {
+    for attr in [0, 2, 6, 22] { #expect(!FavoriteFolder.privacyIsPrivate(attr)) }
+    for attr in [1, 3, 7, 23] { #expect(FavoriteFolder.privacyIsPrivate(attr)) }
+  }
+  @Test @MainActor func confirmedFavoriteIsVisibleEvenWhenRelationLookupWasUnavailable() async {
+    let model = VideoActionsModel()
+    await model.load(detail: detail(), accountID: nil, api: api())
+    #expect(model.relation == nil)
+    model.favoritesSaved(aid: 123, isFavorite: true, wasFavorite: false)
+    #expect(model.isFavorited)
+    #expect(model.counts.favorites == 31)
+    model.favoritesSaved(aid: 123, isFavorite: false, wasFavorite: true)
+    #expect(!model.isFavorited)
+    #expect(model.counts.favorites == 30)
+    model.clear()
+    #expect(!model.isFavorited)
+  }
   @MainActor private func api() -> API {
     let config = URLSessionConfiguration.ephemeral
     config.protocolClasses = [ActionProtocol.self]
@@ -163,6 +265,54 @@ private func relationResponse(_ request: URLRequest, liked: Bool = false, coins:
     }
     _ = try await api().addVideoCoins(aid: 123, bvid: "BV1xx411c7mD", amount: 1, alsoLike: false)
   }
+  @Test @MainActor func officialChallengeSurvivesRejectionAndGrantIsScopedAndSingleUse() async throws {
+    let api = api(), log = RequestLog()
+    ActionProtocol.handler = { request in
+      log.append(form(request))
+      return .init(json: #"{"code":-401,"message":"非法访问","data":{"ga_data":{"riskParams":{"v_voucher":"fixture-voucher"}}}}"#)
+    }
+    var challenge: InteractionChallenge?
+    do {
+      _ = try await api.addVideoCoins(aid: 123, bvid: "BV1xx411c7mD", amount: 1, alsoLike: false)
+      Issue.record("Expected an official challenge")
+    } catch let error as BiliError { challenge = error.challenge }
+    let issued = try #require(challenge)
+    #expect(log.values.count == 1) // A rejected write is never retried automatically.
+    #expect(api.acceptVerification("fixture-token", for: issued))
+    var different = issued.body; different["multiply"] = "2"
+    #expect(api.consumeVerification(path: issued.path, body: different) == nil)
+    #expect(api.consumeVerification(path: "/x/web-interface/archive/like/triple", body: issued.body) == nil)
+    ActionProtocol.handler = { request in
+      let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+      #expect(query.contains(URLQueryItem(name: "gaia_vtoken", value: "fixture-token")))
+      #expect(query.contains(URLQueryItem(name: "token", value: "fixture-token")))
+      #expect(form(request)["tk"] == "fixture-token")
+      #expect(form(request)["csrf"] == "fixture-csrf")
+      log.append(form(request))
+      return .init(json: #"{"code":0,"data":{"like":false}}"#)
+    }
+    _ = try await api.addVideoCoins(aid: 123, bvid: "BV1xx411c7mD", amount: 1, alsoLike: false)
+    #expect(log.values.count == 2)
+    #expect(api.interactionVerification == nil)
+    #expect(api.consumeVerification(path: issued.path, body: issued.body) == nil)
+    let now = Date()
+    #expect(api.acceptVerification("fixture-token", for: issued, now: now))
+    #expect(api.consumeVerification(path: issued.path, body: issued.body, now: now.addingTimeInterval(121)) == nil)
+    api.authenticationGeneration = UUID()
+    #expect(!api.acceptVerification("fixture-token", for: issued))
+  }
+  @Test func challengeVoucherHeaderIsPreservedAndPlainFailuresDoNotInventVerification() throws {
+    let response = try #require(HTTPURLResponse(url: URL(string: "https://api.bilibili.com/x/web-interface/coin/add")!,
+      statusCode: 200, httpVersion: nil, headerFields: ["x-bili-gaia-vvoucher": "fixture-header"]))
+    let challenge = try #require(InteractionChallenge.parse(["code": -352], response: response,
+      path: "/x/web-interface/coin/add", body: [:], authentication: UUID()))
+    let data = try #require(JSONSerialization.jsonObject(with: challenge.payload) as? [String: [String: String]])
+    #expect(data["riskParams"]?["v_voucher"] == "fixture-header")
+    #expect(InteractionChallenge.parse(["code": -403, "message": "denied"], response: response,
+      path: "/x/web-interface/coin/add", body: [:], authentication: UUID()) == nil)
+    #expect(InteractionChallenge.parse(["code": -401], response: response,
+      path: "/x/web-interface/coin/add", body: [:], authentication: UUID()) == nil)
+  }
   @Test @MainActor func tripleIsOneRequestAndPartialResultsAreNotCalledComplete() async {
     let log = RequestLog()
     ActionProtocol.handler = { request in
@@ -221,11 +371,12 @@ private func relationResponse(_ request: URLRequest, liked: Bool = false, coins:
       let query = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
       #expect(query.contains(URLQueryItem(name: "rid", value: "123")))
       #expect(query.contains(URLQueryItem(name: "type", value: "2")))
-      return .init(json: #"{"code":0,"data":{"list":[{"id":1,"title":"one","media_count":4,"fav_state":1,"attr":2},{"id":2,"title":"two","media_count":5,"fav_state":0},{"id":3,"title":"three","media_count":6,"fav_state":0}]}}"#)
+      return .init(json: #"{"code":0,"data":{"list":[{"id":1,"title":"one","media_count":4,"fav_state":1,"attr":3},{"id":2,"title":"two","media_count":5,"fav_state":0,"attr":2},{"id":3,"title":"three","media_count":6,"fav_state":0}]}}"#)
     }
     let api = api(), editor = FavoriteEditor(aid: 123, mid: 1)
     await editor.load(api: api)
     #expect(editor.selected == [1]); #expect(editor.folders.first?.isPrivate == true)
+    #expect(editor.folders[1].isPrivate == false)
     #expect(await editor.save(api: api)); #expect(log.values.isEmpty)
     editor.selected = [3, 2]
     #expect(await editor.save(api: api))

@@ -28,6 +28,22 @@ struct PendingDownload: Codable {
 struct DownloadIndex: Codable {
   var saved: [SavedDownload]
   var jobs: [PendingDownload]
+  /// iOS can move its data container during an update. Cached files live under
+  /// the current app cache; exported files retain their explicit destination.
+  func relocatingCache(to directory: URL) -> Self {
+    Self(saved: saved.map { entry in
+      guard entry.cached == true else { return entry }
+      var copy = entry
+      copy.path = directory.appendingPathComponent(URL(fileURLWithPath: entry.path).lastPathComponent).path
+      copy.danmakuPath = entry.danmakuPath.map {
+        directory.appendingPathComponent(URL(fileURLWithPath: $0).lastPathComponent).path
+      }
+      return copy
+    }, jobs: jobs.map { job in
+      PendingDownload(id: job.id, video: job.video, cid: job.cid, qn: job.qn,
+        folder: job.cached ? directory.path : job.folder, cached: job.cached, progress: job.progress)
+    })
+  }
 }
 @MainActor @Observable final class DownloadJob: Identifiable {
   var pendingRowID: String { "pending-\(id)" }
@@ -179,7 +195,10 @@ enum ParallelMediaDownload {
     index = directory.appendingPathComponent("downloads.json")
     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     if let data = try? Data(contentsOf: index) {
-      if let state = try? JSONDecoder().decode(DownloadIndex.self, from: data) {
+      if var state = try? JSONDecoder().decode(DownloadIndex.self, from: data) {
+        #if os(iOS)
+        state = state.relocatingCache(to: directory.appendingPathComponent("MediaCache"))
+        #endif
         saved = state.saved
         jobs = state.jobs.map { r in
           let j = DownloadJob(
@@ -192,6 +211,10 @@ enum ParallelMediaDownload {
         }
       } else {
         saved = (try? JSONDecoder().decode([SavedDownload].self, from: data)) ?? []
+        #if os(iOS)
+        saved = DownloadIndex(saved: saved, jobs: []).relocatingCache(
+          to: directory.appendingPathComponent("MediaCache")).saved
+        #endif
       }
     }
   }
@@ -213,6 +236,7 @@ enum ParallelMediaDownload {
   func enqueue(video: Video, cid: Int, qn: Int, api: API, cached: Bool = false) {
     var folder = AppPaths.cache
     if !cached {
+      #if os(macOS)
       let p = NSOpenPanel()
       p.canChooseDirectories = true
       p.canChooseFiles = false
@@ -220,6 +244,10 @@ enum ParallelMediaDownload {
       p.prompt = "保存到这里"
       guard p.runModal() == .OK, let url = p.url else { return }
       folder = url
+      #else
+      message = "请先缓存到应用，再从下载页面导出文件"
+      return
+      #endif
     }
     if jobs.contains(where: {
       $0.video.bvid == video.bvid && $0.cid == cid && $0.qn == qn && !$0.finished && !$0.cancelled
@@ -398,6 +426,7 @@ enum ParallelMediaDownload {
       try await result.loadTracks(withMediaType: .audio).count == 1
     else { throw BiliError(text: "合并校验失败") }
   }
+  #if os(macOS)
   func saveDanmaku(video: Video, cid: Int, api: API) async {
     let p = NSSavePanel()
     p.nameFieldStringValue = safeFilename(video.title) + ".xml"
@@ -409,6 +438,7 @@ enum ParallelMediaDownload {
       message = "已保存 \(items.count) 条弹幕"
     } catch { message = error.localizedDescription }
   }
+  #endif
   func forget(_ entry: SavedDownload) {
     saved.removeAll { $0.id == entry.id }
     persist()
@@ -417,19 +447,25 @@ enum ParallelMediaDownload {
     guard entry.cached == true else { return }
     do {
       if FileManager.default.fileExists(atPath: entry.path) {
-        try FileManager.default.trashItem(
-          at: URL(fileURLWithPath: entry.path), resultingItemURL: nil)
+        try Self.removeCachedFile(URL(fileURLWithPath: entry.path))
       }
       if let sidecar = entry.danmakuPath, FileManager.default.fileExists(atPath: sidecar) {
-        try FileManager.default.trashItem(at: URL(fileURLWithPath: sidecar), resultingItemURL: nil)
+        try Self.removeCachedFile(URL(fileURLWithPath: sidecar))
       }
       let xml = URL(fileURLWithPath: entry.path).deletingPathExtension().appendingPathExtension(
         "xml")
       if FileManager.default.fileExists(atPath: xml.path) {
-        try FileManager.default.trashItem(at: xml, resultingItemURL: nil)
+        try Self.removeCachedFile(xml)
       }
       forget(entry)
     } catch { message = error.localizedDescription }
+  }
+  private static func removeCachedFile(_ url: URL) throws {
+    #if os(macOS)
+    try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+    #else
+    try FileManager.default.removeItem(at: url)
+    #endif
   }
   static func mux(video: URL, audio: URL, output: URL) async throws {
     let v = AVURLAsset(url: video)

@@ -24,6 +24,12 @@ struct DynamicEntry: Identifiable {
   let video: Video?
   let commentID: Int
   let commentType: Int
+  var liked = false
+  var likeCount = 0
+  var repostCount = 0
+  var commentCount = 0
+  var attachment: DynamicAttachment? = nil
+  var unavailableText = ""
   static func parse(_ raw: [String: Any]) -> DynamicEntry? {
     guard let id = raw["id_str"] as? String else { return nil }
     let modules = raw["modules"] as? [String: Any] ?? [:]
@@ -45,6 +51,8 @@ struct DynamicEntry: Identifiable {
       (draw["items"] as? [[String: Any]] ?? []).compactMap { $0["src"] as? String }
       + (opus["pics"] as? [[String: Any]] ?? []).compactMap { $0["url"] as? String }
     let basic = raw["basic"] as? [String: Any] ?? [:]
+    let stats = modules["module_stat"] as? [String: Any] ?? [:]
+    let likes = stats["like"] as? [String: Any] ?? [:]
     var video: Video?
     if let archive = major["archive"] as? [String: Any], let bvid = archive["bvid"] as? String {
       let duration = (archive["duration_text"] as? String ?? "0").split(separator: ":").reduce(0) {
@@ -65,9 +73,16 @@ struct DynamicEntry: Identifiable {
         ? "" : "@" + (originalAuthor["name"] as? String ?? "") + "\n" + originalText,
       pictures: Array(pictures.prefix(9)), video: video,
       commentID: Int(basic["comment_id_str"] as? String ?? "") ?? basic["comment_id"] as? Int ?? 0,
-      commentType: basic["comment_type"] as? Int ?? 17)
+      commentType: basic["comment_type"] as? Int ?? 17,
+      liked: likes["status"] as? Bool ?? false, likeCount: likes["count"] as? Int ?? 0,
+      repostCount: (stats["forward"] as? [String: Any])?["count"] as? Int ?? 0,
+      commentCount: (stats["comment"] as? [String: Any])?["count"] as? Int ?? 0,
+      attachment: DynamicAttachment.parse(major: major),
+      unavailableText: (major["none"] as? [String: Any])?["tips"] as? String ??
+        (original["type"] as? String == "DYNAMIC_TYPE_NONE" ? "原动态已无法查看" : ""))
   }
 }
+#if os(macOS)
 struct NativeDynamicsPage: View {
   @Bindable var store: Store
   var mid: Int? = nil
@@ -78,12 +93,15 @@ struct NativeDynamicsPage: View {
   @State private var error: String?
   @State private var detail: DynamicEntry?
   @State private var identity = UUID()
+  @State private var draft = DynamicDraft()
+  @State private var composing = false
   var body: some View {
     ScrollView {
       LazyVStack(alignment: .leading, spacing: 18) {
         HStack {
           Text(mid == nil ? "关注动态" : "动态").font(.title2.bold())
           Spacer()
+          Button("发布动态") { composing = true }.buttonStyle(.glass).disabled(store.account == nil)
           Button {
             Task { await load(reset: true) }
           } label: {
@@ -94,7 +112,7 @@ struct NativeDynamicsPage: View {
         ForEach(items) { item in
           VStack(alignment: .leading, spacing: 14) {
             DynamicContent(entry: item, store: store)
-            if item.commentID > 0 { Button("评论") { detail = item }.buttonStyle(.glass) }
+            DynamicActions(store: store, entry: item, comment: item.commentID > 0 ? { detail = item } : nil)
           }.padding(20).frame(maxWidth: .infinity, alignment: .leading).floatingGlass(24)
         }
         if loading {
@@ -109,6 +127,8 @@ struct NativeDynamicsPage: View {
       }.padding(AppLayout.pageInset)
     }.task(id: mid) { await load(reset: true) }.sheet(item: $detail) { entry in
       NativeDynamicDetail(entry: entry, store: store)
+    }.sheet(isPresented: $composing) {
+      DynamicComposer(store: store, draft: draft) { store.interactionMessage = "动态已发布"; Task { await load(reset: true) } }
     }
   }
   private func load(reset: Bool) async {
@@ -211,6 +231,7 @@ struct NativeDynamicDetail: View {
       ScrollView {
         VStack(alignment: .leading, spacing: 22) {
           DynamicContent(entry: entry, store: store)
+          DynamicActions(store: store, entry: entry)
           CommentsView(
             store: store, aid: entry.commentID, type: entry.commentType, model: comments,
             verificationURL: URL(string: "https://t.bilibili.com/" + entry.id))
@@ -475,3 +496,5 @@ struct NativeAccountPage: View {
     }
   }
 }
+
+#endif

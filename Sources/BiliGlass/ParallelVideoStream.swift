@@ -32,7 +32,8 @@ final class ParallelVideoStream: HTTPRangeStreaming, Sendable {
     let isVideo =
       videoURLs.contains(url)
       || allowedContentTypes?.contains(where: { $0.lowercased().hasPrefix("video/") }) == true
-    guard connections > 1, isVideo, expectedRange.length > UInt64(Self.blockSize) else {
+    let blockSize = Self.blockSize(length: expectedRange.length, connections: connections)
+    guard connections > 1, isVideo, expectedRange.length > UInt64(blockSize) else {
       return try await source.stream(
         from: url, rangeHeader: rangeHeader, expectedRange: expectedRange,
         expectedCompleteLength: expectedCompleteLength, headers: headers,
@@ -49,7 +50,7 @@ final class ParallelVideoStream: HTTPRangeStreaming, Sendable {
       func schedule() throws {
         guard hasRemaining else { return }
         let start = nextStart
-        let end = start + min(Self.blockSize - 1, expectedRange.endInclusive - start)
+        let end = start + min(blockSize - 1, expectedRange.endInclusive - start)
         let range = try HTTPByteRange(start: start, endInclusive: end)
         let index = scheduled
         scheduled += 1
@@ -141,6 +142,14 @@ final class ParallelVideoStream: HTTPRangeStreaming, Sendable {
       return HTTPRangeStreamResult(byteCount: emitted)
     }
   }
+  static func blockSize(length: UInt64, connections: Int) -> Int64 {
+    let lanes = max(1, min(32, connections))
+    // A short HLS segment often contains only 1–3 MiB. Fixed 1 MiB blocks
+    // leave most configured lanes idle until full-file prefetch starts.
+    if (length + UInt64(blockSize) - 1) / UInt64(blockSize) >= lanes { return blockSize }
+    let quantum: UInt64 = 65_536
+    return Int64(max(quantum, min(UInt64(blockSize), (length / UInt64(lanes) / quantum) * quantum)))
+  }
   static func canResume(_ error: Error) -> Bool {
     if error is CDNIdleTimeout { return true }
     if let error = error as? URLError { return [.timedOut, .networkConnectionLost, .cannotConnectToHost].contains(error.code) }
@@ -202,6 +211,7 @@ actor VideoStreamPermits {
   private var lastFailure: ContinuousClock.Instant?
   private var retries = 0
   private var lastReduction: ContinuousClock.Instant?
+  private var lastRecovery: ContinuousClock.Instant?
   private var waiters: [(UUID, CheckedContinuation<Void, Error>, Bool)] = []
   init(limit: Int, recoveryInterval: Duration = .seconds(2)) {
     maximum = max(1, min(32, limit)); self.limit = maximum
@@ -239,7 +249,7 @@ actor VideoStreamPermits {
     ["peakVideoRequests": peak, "videoBlocks": blocks, "effectiveConnections": limit, "configuredConnections": maximum, "activeVideoRequests": active, "queuedVideoRequests": waiters.count, "retriedBlocks": retries]
   }
   func backOff() {
-    retries += 1; successfulBlocks = 0; lastFailure = .now
+    retries += 1; successfulBlocks = 0; lastFailure = .now; lastRecovery = nil
     if lastReduction == nil || lastReduction!.duration(to: .now) >= .seconds(2) {
       limit = max(1, limit / 2); lastReduction = .now
     }
@@ -248,8 +258,9 @@ actor VideoStreamPermits {
     if succeeded {
       successfulBlocks += 1
       if limit < maximum, successfulBlocks >= limit,
-        lastFailure == nil || lastFailure!.duration(to: .now) >= recoveryInterval {
-        limit += 1; successfulBlocks = 0
+        (lastFailure == nil || lastFailure!.duration(to: .now) >= recoveryInterval),
+        (lastRecovery == nil || lastRecovery!.duration(to: .now) >= recoveryInterval) {
+        limit = min(maximum, limit * 2); successfulBlocks = 0; lastRecovery = .now
       }
     }
     active -= 1

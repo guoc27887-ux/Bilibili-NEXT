@@ -1,4 +1,12 @@
+#if os(macOS)
 import AppKit
+typealias SpecialDanmakuColor = NSColor
+private typealias SpecialDanmakuFont = NSFont
+#else
+import UIKit
+typealias SpecialDanmakuColor = UIColor
+private typealias SpecialDanmakuFont = UIFont
+#endif
 import AVFoundation
 
 struct AdvancedDanmaku: Sendable {
@@ -163,7 +171,12 @@ enum BASGeometry {
   var count: Int { layers.count }
   var activate: ((BASValue)->Void)?
   var didPrepare: (() -> Void)?
-  init() { root.isGeometryFlipped = true; root.masksToBounds = true }
+  init() {
+    #if os(macOS)
+    root.isGeometryFlipped = true
+    #endif
+    root.masksToBounds = true
+  }
   isolated deinit { geometryTask?.cancel() }
   func replace(_ value: SpecialCompilation) {
     let retained = Set(value.scripts.map { $0.item.id })
@@ -254,7 +267,7 @@ enum BASGeometry {
               shape = CAShapeLayer()
               // SVG uses a top-left origin. Match the flipped host instead of reflecting
               // each path inside its bounds when Core Animation composites the layer.
-              shape.isGeometryFlipped = true
+              shape.isGeometryFlipped = root.isGeometryFlipped
               layers[id] = shape
             }
             layer = shape
@@ -281,6 +294,7 @@ enum BASGeometry {
             if values["width"] != nil || values["height"] != nil {
               text.bounds.size = CGSize(width:max(1,dimension("width",text.bounds.width)),height:max(1,dimension("height",text.bounds.height)))
             }
+            text.sublayers?.first(where: { $0.name == "solid-text-fill" })?.frame = text.bounds
             if isButton {
               text.backgroundColor = Self.color(Int(n("fillColor",0xFFFFFF)),alpha:n("fillAlpha",1)).cgColor
               text.cornerRadius = 5
@@ -307,18 +321,37 @@ enum BASGeometry {
   private func configureText(_ layer:CATextLayer,id:String,text:String,fontName:String,size:Double,bold:Bool,color:Int,stroke:Double,strokeColor:Int,shadow:Bool,backingScale:CGFloat) {
     let size = min(512,max(1,size)); let key = "\(text):\(fontName):\(size):\(bold):\(color):\(stroke):\(strokeColor):\(shadow):\(backingScale)"
     guard visualKeys[id] != key else { return }; visualKeys[id] = key
-    let font = NSFont(name:fontName,size:size) ?? NSFont.systemFont(ofSize:size,weight:bold ? .semibold:.regular)
+    let font = SpecialDanmakuFont(name:fontName,size:size) ?? SpecialDanmakuFont.systemFont(ofSize:size,weight:bold ? .semibold:.regular)
     var attributes: [NSAttributedString.Key:Any] = [.font:font,.foregroundColor:Self.color(color)]
     if stroke > 0 { attributes[.strokeColor] = Self.color(strokeColor); attributes[.strokeWidth] = -min(30,stroke/size*100) }
     if shadow {
-      let textShadow = NSShadow(); textShadow.shadowColor = NSColor.black.withAlphaComponent(0.7)
+      let textShadow = NSShadow(); textShadow.shadowColor = SpecialDanmakuColor.black.withAlphaComponent(0.7)
       textShadow.shadowBlurRadius = 1; textShadow.shadowOffset = CGSize(width: 0, height: -1)
       attributes[.shadow] = textShadow
     }
     let value = NSAttributedString(string:String(text.prefix(20000)),attributes:attributes)
+    #if os(macOS)
     let measured = value.boundingRect(with:CGSize(width:16384,height:16384),options:[.usesLineFragmentOrigin,.usesFontLeading])
+    #else
+    let measured = value.boundingRect(with:CGSize(width:16384,height:16384),options:[.usesLineFragmentOrigin,.usesFontLeading],context:nil)
+    #endif
     layer.string = value; layer.contentsScale = backingScale
     layer.bounds = CGRect(x:0,y:0,width:ceil(measured.width)+4,height:ceil(measured.height)+4)
+    // CATextLayer can render a negative attributed stroke as an outline only.
+    // A matching plain-text pass guarantees solid interiors on both platforms.
+    if stroke > 0 {
+      let fill = layer.sublayers?.first(where: { $0.name == "solid-text-fill" }) as? CATextLayer ?? CATextLayer()
+      fill.name = "solid-text-fill"
+      fill.contentsScale = backingScale
+      var solid = attributes
+      solid.removeValue(forKey: .strokeWidth); solid.removeValue(forKey: .strokeColor)
+      solid.removeValue(forKey: .shadow)
+      fill.string = NSAttributedString(string:String(text.prefix(20000)),attributes:solid)
+      fill.frame = layer.bounds
+      if fill.superlayer !== layer { layer.addSublayer(fill) }
+    } else {
+      layer.sublayers?.first(where: { $0.name == "solid-text-fill" })?.removeFromSuperlayer()
+    }
     layer.shadowOpacity = 0 // Shadow is part of the cached text bitmap.
   }
   private func transform(x:Double,y:Double,z:Double,scale:Double) -> CATransform3D {
@@ -328,7 +361,11 @@ enum BASGeometry {
     t = CATransform3DRotate(t,CGFloat(x * .pi/180),1,0,0)
     return CATransform3DScale(t,CGFloat(scale),CGFloat(scale),1)
   }
-  nonisolated static func color(_ value:Int,alpha:Double=1) -> NSColor {
-    NSColor(srgbRed:Double((value>>16)&255)/255,green:Double((value>>8)&255)/255,blue:Double(value&255)/255,alpha:min(1,max(0,alpha)))
+  nonisolated static func color(_ value:Int,alpha:Double=1) -> SpecialDanmakuColor {
+    #if os(macOS)
+    return NSColor(srgbRed:Double((value>>16)&255)/255,green:Double((value>>8)&255)/255,blue:Double(value&255)/255,alpha:min(1,max(0,alpha)))
+    #else
+    return UIColor(red:Double((value>>16)&255)/255,green:Double((value>>8)&255)/255,blue:Double(value&255)/255,alpha:min(1,max(0,alpha)))
+    #endif
   }
 }

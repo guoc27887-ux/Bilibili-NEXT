@@ -10,6 +10,7 @@ struct VideoActionBar: View {
   @Bindable var store: Store
   let detail: Detail
   @State private var sheet: VideoActionSheet?
+  @State private var loginAfterDismiss = false
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   private var model: VideoActionsModel { store.videoActions }
   private var identity: String { "\(detail.aid):\(store.account?.mid ?? 0):\(store.api.authenticationGeneration)" }
@@ -48,15 +49,21 @@ struct VideoActionBar: View {
           Label(error, systemImage: "exclamationmark.circle").font(.callout).foregroundStyle(.secondary)
           if model.needsVerification {
             Button("完成验证") { store.webTarget = WebTarget(url: VideoShareLink.make(bvid: detail.video.bvid, page: 1, seconds: nil), title: "互动验证") }
+            Button("重新登录") { store.login() }
           }
         }.buttonStyle(.glass)
       }
     }.task(id: identity) { await refresh() }
       .onChange(of: identity) { sheet = nil }
       .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: model.relation)
-      .sheet(item: $sheet) { target in
+      .sheet(item: $sheet, onDismiss: {
+        if loginAfterDismiss { loginAfterDismiss = false; store.authorizeCoins() }
+      }) { target in
         switch target {
-        case .coin: CoinSheet(store: store, detail: detail)
+        case .coin: CoinSheet(store: store, detail: detail) {
+          loginAfterDismiss = true
+          sheet = nil
+        }
         case .triple: TripleSheet(store: store, detail: detail)
         case .favorite: FavoriteSheet(store: store, detail: detail)
         case .share: VideoShareSheet(store: store, detail: detail)
@@ -85,18 +92,34 @@ struct VideoActionBar: View {
 private struct InteractionVerification: View {
   let store: Store
   let detail: Detail
+  @State private var useWebsite = false
   @Environment(\.dismiss) private var dismiss
   var body: some View {
     VStack(spacing: 0) {
-      HStack { Text("官方验证").font(.headline); Spacer(); Button("完成") { dismiss() } }.padding(14)
-      OfficialWebPanel(target: WebTarget(url: VideoShareLink.make(bvid: detail.video.bvid, page: 1, seconds: nil), title: "互动验证"), api: store.api)
-    }.frame(width: 1000, height: 720)
+      HStack {
+        Text(useWebsite ? "官网互动" : "官方验证").font(.headline)
+        Spacer()
+        if !useWebsite, store.videoActions.challenge != nil {
+          Button("在官网继续") { useWebsite = true }
+        }
+        Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
+      }.padding(14)
+      if let challenge = store.videoActions.challenge, !useWebsite {
+        OfficialChallengeView(api: store.api, challenge: challenge) {
+          store.videoActions.verificationCompleted()
+          dismiss()
+        }
+      } else {
+        OfficialWebPanel(target: WebTarget(url: VideoShareLink.make(bvid: detail.video.bvid, page: 1, seconds: nil), title: "互动验证"), api: store.api)
+      }
+    }.frame(minWidth: 640, idealWidth: 1000, minHeight: 560, idealHeight: 720)
   }
 }
 
 struct CoinSheet: View {
   @Bindable var store: Store
   let detail: Detail
+  let relogin: () -> Void
   @Environment(\.dismiss) private var dismiss
   @State private var amount = 1
   @State private var alsoLike = false
@@ -147,10 +170,21 @@ struct CoinSheet: View {
         Text((model.relation?.coins ?? 0) >= limit ? "本视频已投满" : "硬币余额不足").foregroundStyle(.secondary)
       }
       if let error = localError ?? model.error { Text(error).font(.callout).foregroundStyle(.secondary) }
+      if model.needsVerification || (model.error != nil && store.api.appCoinAuthorization != nil) {
+        VStack(alignment: .leading, spacing: 8) {
+          Text("授权过期或反复验证失败时，可重新扫码授权投币。").font(.callout).foregroundStyle(.secondary)
+          HStack {
+            Button("修复投币登录", action: relogin).disabled(busy)
+            Button("在浏览器完成") {
+              NSWorkspace.shared.open(VideoShareLink.make(bvid: detail.video.bvid, page: 1, seconds: nil))
+            }.disabled(busy)
+          }
+        }
+      }
       Text("投币后无法撤回。").font(.caption).foregroundStyle(.secondary)
       HStack {
         Button("刷新状态") { Task { await prepare() } }.disabled(busy)
-        if model.needsVerification { Button("完成验证") { verify = true }.disabled(busy) }
+        Button(model.needsVerification ? "完成验证" : "在官网完成") { verify = true }.disabled(busy)
         Spacer()
         Button(model.operation == "coin" ? "提交中…" : "投 \(amount) 枚") {
           Task {
