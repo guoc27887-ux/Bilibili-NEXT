@@ -47,6 +47,10 @@ private struct FeedSnapshot: Codable {
   let owner: String
 }
 @MainActor @Observable final class Store {
+  let guide = FeatureGuideController()
+  var loginUpgradeReason: LoginUpgradeReason?
+  var loginUpgradeDismissed = false
+  var preferencesTab = 0
   let api = API(loadCredentials: false)
   let playback = Playback()
   let fullscreen = FullscreenPlayerController()
@@ -91,7 +95,6 @@ private struct FeedSnapshot: Codable {
   var restoring = true
   var account: Account?
   var showLogin = false
-  var authorizingCoins = false
   var showPlayer = false
   var isPlaybackOpen = false
   var showsMiniPlayer: Bool { isPlaybackOpen && !showPlayer && !fullscreen.isPresented }
@@ -106,6 +109,7 @@ private struct FeedSnapshot: Codable {
   private var feedKey: String { destination.rawValue + "|" + activeQuery + "|\(selectedFolder)|\(selectedRegion)|\(searchOptions)|\(libraryQuery)" }
   private var feedOwner: String { api.cookies["DedeUserID"] ?? "guest" }
   init() {
+    guide.store = self
     if let data = UserDefaults.standard.data(forKey: "history") {
       history = (try? JSONDecoder().decode([HistoryEntry].self, from: data)) ?? []
     }
@@ -121,6 +125,10 @@ private struct FeedSnapshot: Codable {
   }
   func start() async {
     await api.restoreCredentials()
+    loginUpgradeReason = LoginUpgradeReason.evaluate(cookies: api.cookies, authorization: api.appCoinAuthorization)
+    if !ProcessInfo.processInfo.arguments.contains(where: { $0.hasPrefix("--") }) {
+      guide.scheduleAutomaticPresentation()
+    }
     if UserDefaults.standard.string(forKey: "danmakuCloudOwner") != feedOwner {
       UserDefaults.standard.removeObject(forKey: "danmakuCloudRules")
     }
@@ -426,13 +434,6 @@ private struct FeedSnapshot: Codable {
     } catch { interactionMessage = error.localizedDescription }
   }
   func login() {
-    authorizingCoins = false
-    showLogin = true
-    refreshQR()
-  }
-  func authorizeCoins() {
-    guard account != nil else { login(); return }
-    authorizingCoins = true
     showLogin = true
     refreshQR()
   }
@@ -443,66 +444,35 @@ private struct FeedSnapshot: Codable {
     loginStatus = "正在获取二维码"
     loginTask = Task {
       do {
-        if authorizingCoins {
-          let generation = api.authenticationGeneration
-          guard let mid = api.cookies["DedeUserID"] else { throw BiliError(text: "请先登录") }
-          let qr = try await api.appCoinQRCode()
-          try Task.checkCancellation()
-          let filter = CIFilter.qrCodeGenerator(); filter.message = Data(qr.url.utf8)
-          guard let ci = filter.outputImage,
-            let cg = CIContext().createCGImage(ci.transformed(by: CGAffineTransform(scaleX: 8, y: 8)),
-              from: ci.extent.applying(CGAffineTransform(scaleX: 8, y: 8))) else { throw BiliError(text: "二维码生成失败") }
-          qrImage = NSImage(cgImage: cg, size: NSSize(width: 208, height: 208))
-          loginStatus = "使用当前账号扫码，并在手机确认授权"
-          for _ in 0..<90 {
-            try await Task.sleep(for: .seconds(2))
-            try Task.checkCancellation()
-            guard api.authenticationGeneration == generation else { throw CancellationError() }
-            if let credential = try await api.pollAppCoinAuthorization(qr.code, expectedAccount: mid) {
-              try Task.checkCancellation()
-              try api.saveAppCoinAuthorization(credential)
-              videoActions.clear()
-              loginStatus = "投币授权已更新"
-              showLogin = false
-              return
-            }
-          }
-          loginExpired = true; loginStatus = "二维码已过期"
-          return
-        }
-        let d = try await api.request("/x/passport-login/web/qrcode/generate")
+        let generation = api.authenticationGeneration
+        let qr = try await api.appCoinQRCode()
         try Task.checkCancellation()
-        guard let url = d["url"] as? String, let key = d["qrcode_key"] as? String else {
-          throw BiliError(text: "二维码获取失败")
-        }
-        let filter = CIFilter.qrCodeGenerator()
-        filter.message = Data(url.utf8)
+        let filter = CIFilter.qrCodeGenerator(); filter.message = Data(qr.url.utf8)
         guard let ci = filter.outputImage,
-          let cg = CIContext().createCGImage(
-            ci.transformed(by: CGAffineTransform(scaleX: 8, y: 8)),
-            from: ci.extent.applying(CGAffineTransform(scaleX: 8, y: 8)))
-        else { throw BiliError(text: "二维码生成失败") }
+          let cg = CIContext().createCGImage(ci.transformed(by: CGAffineTransform(scaleX: 8, y: 8)),
+            from: ci.extent.applying(CGAffineTransform(scaleX: 8, y: 8))) else { throw BiliError(text: "二维码生成失败") }
         qrImage = NSImage(cgImage: cg, size: NSSize(width: 208, height: 208))
-        loginStatus = "使用哔哩哔哩 App 扫码"
+        loginStatus = "使用哔哩哔哩 App 扫码，并在手机确认"
         for _ in 0..<90 {
           try await Task.sleep(for: .seconds(2))
           try Task.checkCancellation()
-          let p = try await api.request("/x/passport-login/web/qrcode/poll", ["qrcode_key": key])
-          try Task.checkCancellation()
-          switch p["code"] as? Int {
-          case 0:
+          guard api.authenticationGeneration == generation else { throw CancellationError() }
+          if let login = try await api.pollClientLogin(qr.code) {
+            try Task.checkCancellation()
+            try api.saveClientLogin(login)
+            loginUpgradeReason = nil
+            loginUpgradeDismissed = false
             videoActions.clear()
-            account = try await api.nav()
+            // The confirmed login remains usable if profile loading is temporarily offline.
+            let mid = login.appCoinAuthorization!.accountID
+            account = Account(name: account?.mid == mid ? account!.name : "已登录", mid: mid,
+              face: account?.mid == mid ? account!.face : "")
+            if let profile = try? await api.nav(), api.cookies["DedeUserID"] == String(mid) { account = profile }
+            try Task.checkCancellation()
             loginStatus = "已登录"
             showLogin = false
             if !showPlayer { reload() }
             return
-          case 86090: loginStatus = "请在手机上确认"
-          case 86038:
-            loginExpired = true
-            loginStatus = "二维码已过期"
-            return
-          default: break
           }
         }
         loginExpired = true
@@ -538,6 +508,8 @@ private struct FeedSnapshot: Codable {
     navigationRevision += 1
     profileTarget = nil
     api.logout()
+    loginUpgradeReason = nil
+    loginUpgradeDismissed = false
     destination = .recommend
     activeQuery = ""; query = ""
     account = nil

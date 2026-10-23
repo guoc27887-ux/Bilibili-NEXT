@@ -14,6 +14,15 @@ struct RootView: View {
         sidebar(compact: viewport.size.height < 820).frame(width: AppLayout.sidebarWidth)
         VStack(spacing: 16) {
           GlassEffectContainer { topbar }
+          if let reason = store.loginUpgradeReason, !store.loginUpgradeDismissed {
+            HStack(spacing: 12) {
+              Image(systemName: "person.crop.circle.badge.exclamationmark")
+              Text(reason.message).font(.callout).fixedSize(horizontal: false, vertical: true)
+              Spacer(minLength: 0)
+              Button("重新登录") { store.login() }.buttonStyle(.glassProminent)
+              Button("稍后") { store.loginUpgradeDismissed = true }.buttonStyle(.glass)
+            }.padding(14).floatingGlass(18)
+          }
           if searchFocused && !store.showPlayer { SearchAssistance(store: store) }
           content.frame(maxWidth: .infinity, maxHeight: .infinity).clipShape(
             RoundedRectangle(cornerRadius: 24))
@@ -182,7 +191,7 @@ struct RootView: View {
             in: .rect(cornerRadius: 12)
           )
           .foregroundStyle(.primary)
-        }.buttonStyle(.plain)
+        }.buttonStyle(NavigationButtonStyle()).tint(.primary)
       }
     }.padding(12).floatingGlass(24)
   }
@@ -215,7 +224,7 @@ struct RootView: View {
       } label: {
         Image(systemName: "arrow.clockwise")
       }.help("刷新")
-    }.buttonStyle(.glass).padding(.horizontal, 12).frame(height: AppLayout.toolbarHeight).floatingGlass(AppLayout.panelRadius)
+    }.buttonStyle(.glass).tint(.primary).padding(.horizontal, 12).frame(height: AppLayout.toolbarHeight).floatingGlass(AppLayout.panelRadius)
   }
   @ViewBuilder private var content: some View {
     if store.showPlayer {
@@ -260,7 +269,6 @@ struct RootView: View {
             Button("我的主页") { store.navigate(.profile) }
             SettingsLink { Text("设置") }
             Button("重新登录") { store.login() }
-            Button("修复投币登录") { store.authorizeCoins() }
             Button("退出登录", role: .destructive) { store.logout() }
           } label: {
             Image(systemName: "ellipsis")
@@ -388,6 +396,7 @@ struct Thumbnail: View {
   let mode: ContentMode
   var placeholder = "play.rectangle"
   @State private var image: NSImage?
+  @Environment(\.displayScale) private var displayScale
   var body: some View {
     GeometryReader { g in
       Group {
@@ -399,15 +408,16 @@ struct Thumbnail: View {
           }
         }
       }.frame(width: g.size.width, height: g.size.height).clipped()
-    }.task(id: url) {
+      .task(id: "\(url)|\(ThumbnailCache.pixelSize(Int(max(g.size.width, g.size.height) * displayScale)))") {
       image = nil
       let value =
         url.hasPrefix("//")
         ? "https:" + url : url.replacingOccurrences(of: "http://", with: "https://")
       guard let target = URL(string: value),
-        let decoded = try? await ThumbnailCache.shared.thumbnail(target), !Task.isCancelled
+        let decoded = try? await ThumbnailCache.shared.thumbnail(target, maxPixelSize: Int(max(g.size.width, g.size.height) * displayScale)), !Task.isCancelled
       else { return }
       image = NSImage(cgImage: decoded, size: .zero)
+    }
     }.onDisappear { image = nil }
   }
 }
@@ -574,7 +584,7 @@ struct LoginSheet: View {
   var body: some View {
     VStack(spacing: 20) {
       HStack {
-        Text(store.authorizingCoins ? "授权客户端投币" : "登录哔哩哔哩").font(.title2.weight(.semibold))
+        Text("登录哔哩哔哩").font(.title2.weight(.semibold))
         Spacer()
         Button {
           store.showLogin = false
@@ -592,10 +602,8 @@ struct LoginSheet: View {
         if store.loginExpired { Button("刷新二维码") { store.refreshQR() }.buttonStyle(.glassProminent) }
       }.frame(width: 230, height: 230)
       Text(store.loginStatus).font(.callout).foregroundStyle(.secondary)
-      if store.authorizingCoins {
-        Text("授权保存在本机钥匙串，仅用于当前账号投币。授权完成后不会自动投币。")
-          .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
-      }
+      Text("一次扫码即可使用浏览、收藏与投币。登录不会自动投币。")
+        .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
       Text("登录信息保存在 macOS 钥匙串").font(.caption).foregroundStyle(.tertiary)
     }.padding(28).frame(width: 380).background { GlassBackdrop() }
   }

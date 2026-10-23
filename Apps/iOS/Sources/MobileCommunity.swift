@@ -333,6 +333,7 @@ struct MobileInteractionSheet: View {
   @Bindable var store: Store
   let detail: Detail
   let kind: String
+  let relogin: () -> Void
   @State private var amount = 1
   @State private var alsoLike = false
   @State private var balance: Double?
@@ -341,8 +342,11 @@ struct MobileInteractionSheet: View {
   @State private var privateFolder = false
   @State private var localError: String?
   @State private var discardChanges = false
-  @State private var verify = false
+  @State private var preparing = true
   @Environment(\.dismiss) private var dismiss
+  private var limit: Int { detail.copyright == 2 ? 1 : 2 }
+  private var choice: CoinAvailability { CoinAvailability(limit: limit, coins: store.actions.relation?.coins, balance: balance) }
+  private var busy: Bool { preparing || store.actions.loading || store.actions.operation != nil }
   var body: some View {
     NavigationStack {
       Form {
@@ -351,20 +355,28 @@ struct MobileInteractionSheet: View {
           if let editor { favoriteContents(editor) } else { Section { ProgressView("正在加载收藏夹") } }
         } else if kind == "coin" {
           Section("投币") {
-            LabeledContent("余额", value: balance?.formatted() ?? "读取中")
-            LabeledContent("已投", value: String(store.actions.relation?.coins ?? 0))
-            Picker("数量", selection: $amount) {
-              Text("1 枚").tag(1)
-              Text("2 枚").tag(2)
-            }.pickerStyle(.segmented)
-            Toggle("同时点赞", isOn: $alsoLike)
-            let choice = CoinAvailability(
-              limit: detail.copyright == 2 ? 1 : 2, coins: store.actions.relation?.coins,
-              balance: balance)
-            if let reason = choice.reason(for: amount) {
-              Text(reason).font(.caption).foregroundStyle(.secondary)
+            LabeledContent("我的硬币", value: balance?.formatted(.number.precision(.fractionLength(0...1))) ?? "—")
+            LabeledContent("本视频已投", value: store.actions.relation.map { "\($0.coins) / \(limit) 枚" } ?? "—")
+              .accessibilityIdentifier("coin-relation")
+            HStack(spacing: 12) {
+              ForEach(1...2, id: \.self) { value in
+                Button { amount = value } label: {
+                  VStack(spacing: 8) { Image(systemName: "c.circle").font(.title2); Text("\(value) 枚").font(.headline) }
+                    .frame(maxWidth: .infinity).padding(.vertical, 12).contentShape(.rect(cornerRadius: 16))
+                }.buttonStyle(.plain).foregroundStyle(.primary)
+                  .glassEffect(.regular.tint(amount == value ? biliPink.opacity(0.22) : .clear), in: .rect(cornerRadius: 16))
+                  .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(amount == value ? biliPink : .clear, lineWidth: 1.5).allowsHitTesting(false) }
+                  .opacity(value > choice.available ? 0.4 : 1)
+                  .disabled(busy || value > choice.available)
+                  .accessibilityIdentifier("coin-amount-\(value)")
+                  .accessibilityAddTraits(amount == value ? .isSelected : [])
+                  .accessibilityHint(choice.reason(for: value) ?? "")
+              }
             }
-            Button("确认投币") {
+            if store.actions.relation?.liked != true { Toggle("同时点赞", isOn: $alsoLike).disabled(busy) }
+            if preparing { ProgressView("正在读取投币状态") }
+            else if let reason = choice.reason(for: 2) { Text(reason).font(.caption).foregroundStyle(.secondary) }
+            Button(store.actions.operation == "coin" ? "提交中…" : "投 \(amount) 枚") {
               Task {
                 if await store.actions.sendCoins(
                   amount: amount, limit: detail.copyright == 2 ? 1 : 2, balance: balance ?? 0,
@@ -373,7 +385,8 @@ struct MobileInteractionSheet: View {
                   dismiss()
                 }
               }
-            }.disabled(choice.reason(for: amount) != nil || store.actions.operation != nil)
+            }.disabled(busy || choice.reason(for: amount) != nil)
+              .accessibilityIdentifier("submit-coins")
           }
           Text("投币后无法撤回。结果未确认时先刷新，不自动重试。").font(.caption).foregroundStyle(.secondary)
         } else if kind == "triple" {
@@ -383,7 +396,7 @@ struct MobileInteractionSheet: View {
             Label("收藏到默认收藏夹", systemImage: "star")
             Button("确认三连") {
               Task { if await store.actions.sendTriple(api: store.api) { dismiss() } }
-            }.disabled(store.actions.relation == nil || store.actions.operation != nil)
+            }.disabled(busy || store.actions.relation == nil)
           }
           Text("投币后无法撤回；分别保留服务器确认的结果。").font(.caption).foregroundStyle(.secondary)
         } else if kind == "download" {
@@ -395,17 +408,16 @@ struct MobileInteractionSheet: View {
         if let error = localError ?? store.actions.error {
           Section {
             Text(error).foregroundStyle(.red)
-            Button("刷新状态") { Task { await prepare() } }
-            Button("官方验证") {
-              if store.actions.challenge != nil {
-                verify = true
-              } else {
-                store.webTarget = WebTarget(
-                  url: URL(string: "https://www.bilibili.com/video/" + detail.video.bvid)!,
-                  title: "官方验证")
-                dismiss()
-              }
-            }
+            Button("刷新状态") { Task { await prepare() } }.disabled(busy)
+            Button("重新登录", action: relogin).disabled(busy).accessibilityIdentifier("interaction-relogin")
+            Link("在网页打开", destination: VideoShareLink.make(bvid: detail.video.bvid, page: 1, seconds: nil))
+              .disabled(busy)
+          }
+        }
+        if let notice = store.actions.notice {
+          Section {
+            Text(notice)
+            if store.actions.relation == nil { Button("刷新状态") { Task { await prepare() } }.disabled(busy) }
           }
         }
       }.navigationTitle(
@@ -426,7 +438,7 @@ struct MobileInteractionSheet: View {
               .accessibilityIdentifier("save-favorites")
           }
         } else {
-          ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() } }
+          ToolbarItem(placement: .confirmationAction) { Button("完成") { dismiss() }.disabled(store.actions.operation != nil) }
         }
       }.task {
         await prepare()
@@ -438,20 +450,7 @@ struct MobileInteractionSheet: View {
         Button("放弃更改", role: .destructive) { dismiss() }
         Button("继续编辑", role: .cancel) {}
       }
-    }.presentationDetents(kind == "favorite" ? [.large] : [.medium, .large])
-      .sheet(isPresented: $verify, onDismiss: { Task { await prepare() } }) {
-        NavigationStack {
-          if let challenge = store.actions.challenge {
-            OfficialChallengeView(api: store.api, challenge: challenge) {
-              store.actions.verificationCompleted()
-              verify = false
-            }.navigationTitle("官方验证").navigationBarTitleDisplayMode(.inline)
-              .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("关闭") { verify = false } }
-              }
-          }
-        }
-      }
+    }.presentationDetents(kind == "download" ? [.medium, .large] : [.large])
   }
   @ViewBuilder private func favoriteContents(_ editor: FavoriteEditor) -> some View {
     @Bindable var editor = editor
@@ -519,7 +518,9 @@ struct MobileInteractionSheet: View {
     }
   }
   private func prepare() async {
-    localError = nil
+    preparing = true; localError = nil; balance = nil
+    defer { preparing = false }
+    let session = store.api.authenticationGeneration
     if kind == "favorite" {
       guard let account = store.account else {
         localError = "请先登录后再收藏"
@@ -536,8 +537,11 @@ struct MobileInteractionSheet: View {
     if kind == "coin" {
       do {
         let data = try await store.api.request("/x/web-interface/nav")
-        balance = data["money"] as? Double
-      } catch { localError = error.localizedDescription }
+        guard !Task.isCancelled, session == store.api.authenticationGeneration else { return }
+        guard let money = data["money"] as? Double, money.isFinite else { throw BiliError(text: "未能读取硬币余额，请刷新") }
+        balance = max(0, money)
+        amount = min(max(1, choice.available), amount)
+      } catch { if !Task.isCancelled, session == store.api.authenticationGeneration { localError = error.localizedDescription } }
     }
   }
 }

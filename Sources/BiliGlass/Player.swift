@@ -644,6 +644,8 @@ struct PlaybackResume {
     cdnTransport = nil
     if let cache = diskCache { Task { await cache.stop() } }
     diskCache = nil
+    videoTransport = nil
+    bridge = DASHToHLSBridge()
   }
   func stop() {
     showsSystemControls = false

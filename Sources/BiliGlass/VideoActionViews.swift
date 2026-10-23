@@ -11,6 +11,7 @@ struct VideoActionBar: View {
   let detail: Detail
   @State private var sheet: VideoActionSheet?
   @State private var loginAfterDismiss = false
+  @State private var tripleProgress: CGFloat = 0
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   private var model: VideoActionsModel { store.videoActions }
   private var identity: String { "\(detail.aid):\(store.account?.mid ?? 0):\(store.api.authenticationGeneration)" }
@@ -20,9 +21,9 @@ struct VideoActionBar: View {
       GlassEffectContainer(spacing: 10) {
         HStack(spacing: 10) {
           action(title: model.relation?.liked == true ? "已点赞" : "点赞", icon: model.relation?.liked == true ? "hand.thumbsup.fill" : "hand.thumbsup",
-                 count: model.counts.likes, active: model.relation?.liked == true, busy: model.operation == "like") {
+                 count: model.counts.likes, active: model.relation?.liked == true, busy: model.operation == "like", holdToTriple: true) {
             authenticated { Task { await model.toggleLike(api: store.api) } }
-          }.disabled(disabled).help(model.relation?.liked == true ? "取消点赞" : "点赞")
+          }.disabled(disabled).help("点击点赞，按住 1.2 秒完成三连")
           action(title: (model.relation?.coins ?? 0) > 0 ? "已投 \(model.relation!.coins) 枚" : "投币", icon: "c.circle",
                  count: model.counts.coins, active: (model.relation?.coins ?? 0) > 0) { authenticated { sheet = .coin } }.disabled(disabled)
           action(title: model.relation?.favorited == true ? "已收藏" : "收藏", icon: model.relation?.favorited == true ? "star.fill" : "star",
@@ -31,15 +32,16 @@ struct VideoActionBar: View {
         }
       }
       HStack(spacing: 12) {
-        Button { authenticated { sheet = .triple } } label: { Label("一键三连", systemImage: "hand.thumbsup.circle") }
-          .disabled(disabled)
         Button { authenticated { Task { await store.addLater(detail.aid) } } } label: { Label("稍后再看", systemImage: "text.badge.plus") }
         if store.account != nil {
           Button { Task { await refresh() } } label: { Image(systemName: "arrow.clockwise") }
             .help("刷新互动状态").accessibilityLabel("刷新互动状态").disabled(model.loading || model.operation != nil)
         }
         if model.loading { ProgressView().controlSize(.small); Text("同步状态").font(.caption).foregroundStyle(.secondary) }
-        if let notice = model.notice { Text(notice).font(.caption).foregroundStyle(.secondary).transition(.opacity) }
+        if tripleProgress > 0 || model.operation == "triple" {
+          Text(model.operation == "triple" ? "正在三连…" : "按住三连 · 最多 \(detail.copyright == 2 ? 1 : 2) 枚，松开取消")
+            .font(.caption).foregroundStyle(.secondary)
+        } else if let notice = model.notice { Text(notice).font(.caption).foregroundStyle(.secondary).transition(.opacity) }
         Spacer(minLength: 4)
         Toggle("弹幕", isOn: $store.danmaku.enabled).toggleStyle(.switch).fixedSize()
           .onChange(of: store.danmaku.enabled) { UserDefaults.standard.set(store.danmaku.enabled, forKey: "danmakuEnabled") }
@@ -48,23 +50,24 @@ struct VideoActionBar: View {
         HStack {
           Label(error, systemImage: "exclamationmark.circle").font(.callout).foregroundStyle(.secondary)
           if model.needsVerification {
-            Button("完成验证") { store.webTarget = WebTarget(url: VideoShareLink.make(bvid: detail.video.bvid, page: 1, seconds: nil), title: "互动验证") }
             Button("重新登录") { store.login() }
           }
         }.buttonStyle(.glass)
       }
     }.task(id: identity) { await refresh() }
-      .onChange(of: identity) { sheet = nil }
+      .onChange(of: identity) { sheet = nil; tripleProgress = 0 }
       .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: model.relation)
       .sheet(item: $sheet, onDismiss: {
-        if loginAfterDismiss { loginAfterDismiss = false; store.authorizeCoins() }
+        if loginAfterDismiss { loginAfterDismiss = false; store.login() }
       }) { target in
         switch target {
         case .coin: CoinSheet(store: store, detail: detail) {
           loginAfterDismiss = true
           sheet = nil
         }
-        case .triple: TripleSheet(store: store, detail: detail)
+        case .triple: TripleSheet(store: store, detail: detail) {
+          loginAfterDismiss = true; sheet = nil
+        }
         case .favorite: FavoriteSheet(store: store, detail: detail)
         case .share: VideoShareSheet(store: store, detail: detail)
         }
@@ -72,8 +75,8 @@ struct VideoActionBar: View {
   }
   private func refresh() async { await model.load(detail: detail, accountID: store.account?.mid, api: store.api) }
   private func authenticated(_ action: () -> Void) { if store.account == nil { store.login() } else { action() } }
-  private func action(title: String, icon: String, count: Int, active: Bool = false, busy: Bool = false, perform: @escaping () -> Void) -> some View {
-    Button(action: perform) {
+  private func action(title: String, icon: String, count: Int, active: Bool = false, busy: Bool = false, holdToTriple: Bool = false, perform: @escaping () -> Void) -> some View {
+    let button = Button(action: perform) {
       HStack(spacing: 10) {
         if busy { ProgressView().controlSize(.small).frame(width: 22) }
         else { Image(systemName: icon).font(.title3).frame(width: 22) }
@@ -83,9 +86,59 @@ struct VideoActionBar: View {
         }
         Spacer(minLength: 0)
       }.padding(.horizontal, 8).padding(.vertical, 5).frame(maxWidth: .infinity, minHeight: 40).contentShape(.rect(cornerRadius: 18))
-    }.buttonStyle(.plain).foregroundStyle(.primary)
+    }.foregroundStyle(.primary).tint(.primary)
       .glassEffect(.regular.tint(active ? biliPink.opacity(0.22) : .clear).interactive(), in: .rect(cornerRadius: 18))
+      .overlay {
+        if icon != "square.and.arrow.up" && tripleProgress > 0 {
+          RoundedRectangle(cornerRadius: 18).trim(from: 0, to: tripleProgress)
+            .stroke(biliPink, style: StrokeStyle(lineWidth: 2.5, lineCap: .round)).allowsHitTesting(false)
+        }
+      }
       .accessibilityLabel(title).accessibilityValue("\(count)")
+    return Group {
+      if holdToTriple {
+        button.buttonStyle(TriplePressStyle(progress: $tripleProgress, perform: {
+          guard store.account != nil else { tripleProgress = 0; store.login(); return }
+          Task { _ = await model.sendTriple(api: store.api); tripleProgress = 0 }
+        }))
+        .accessibilityAction(named: "一键三连") { authenticated { sheet = .triple } }
+      } else { button.buttonStyle(NavigationButtonStyle()) }
+    }
+  }
+}
+
+private struct TriplePressStyle: PrimitiveButtonStyle {
+  @Binding var progress: CGFloat
+  let perform: () -> Void
+  func makeBody(configuration: Configuration) -> some View {
+    TriplePressSurface(label: configuration.label, progress: $progress, tap: configuration.trigger, hold: perform)
+  }
+}
+private struct TriplePressSurface<Label: View>: View {
+  let label: Label
+  @Binding var progress: CGFloat
+  let tap: () -> Void
+  let hold: () -> Void
+  @State private var completed = false
+  @Environment(\.isEnabled) private var enabled
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  var body: some View {
+    label.contentShape(Rectangle())
+      .onTapGesture { if enabled && !completed { tap() } }
+      .onLongPressGesture(minimumDuration: 1.2, maximumDistance: 18, perform: {
+        guard enabled, !completed else { return }
+        completed = true
+        progress = 1
+        hold()
+      }, onPressingChanged: { pressing in
+        if pressing && enabled {
+          completed = false
+          progress = 0
+          withAnimation(reduceMotion ? nil : .linear(duration: 1.2)) { progress = 1 }
+        } else if !completed { progress = 0 }
+      })
+      .accessibilityAction { if enabled { tap() } }
+      .onDisappear { progress = 0 }
   }
 }
 
@@ -126,7 +179,6 @@ struct CoinSheet: View {
   @State private var balance: Double?
   @State private var preparing = true
   @State private var localError: String?
-  @State private var verify = false
   private var model: VideoActionsModel { store.videoActions }
   private var limit: Int { detail.copyright == 2 ? 1 : 2 }
   private var choice: CoinAvailability { CoinAvailability(limit: limit, coins: model.relation?.coins, balance: balance) }
@@ -171,20 +223,16 @@ struct CoinSheet: View {
       }
       if let error = localError ?? model.error { Text(error).font(.callout).foregroundStyle(.secondary) }
       if model.needsVerification || (model.error != nil && store.api.appCoinAuthorization != nil) {
-        VStack(alignment: .leading, spacing: 8) {
-          Text("授权过期或反复验证失败时，可重新扫码授权投币。").font(.callout).foregroundStyle(.secondary)
-          HStack {
-            Button("修复投币登录", action: relogin).disabled(busy)
-            Button("在浏览器完成") {
-              NSWorkspace.shared.open(VideoShareLink.make(bvid: detail.video.bvid, page: 1, seconds: nil))
-            }.disabled(busy)
-          }
-        }
+        Button("重新登录", action: relogin).disabled(busy)
       }
       Text("投币后无法撤回。").font(.caption).foregroundStyle(.secondary)
       HStack {
-        Button("刷新状态") { Task { await prepare() } }.disabled(busy)
-        Button(model.needsVerification ? "完成验证" : "在官网完成") { verify = true }.disabled(busy)
+        if localError != nil || model.error != nil || (!preparing && model.relation == nil) {
+          Button("刷新状态") { Task { await prepare() } }.disabled(busy)
+          Button("在网页打开") {
+            NSWorkspace.shared.open(VideoShareLink.make(bvid: detail.video.bvid, page: 1, seconds: nil))
+          }.disabled(busy)
+        }
         Spacer()
         Button(model.operation == "coin" ? "提交中…" : "投 \(amount) 枚") {
           Task {
@@ -196,7 +244,6 @@ struct CoinSheet: View {
       .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: amount)
       .interactiveDismissDisabled(model.operation != nil)
       .task { await prepare() }
-      .sheet(isPresented: $verify, onDismiss: { Task { await prepare() } }) { InteractionVerification(store: store, detail: detail) }
   }
   private func prepare() async {
     preparing = true; balance = nil; localError = nil
@@ -216,7 +263,7 @@ struct CoinSheet: View {
 struct TripleSheet: View {
   @Bindable var store: Store
   let detail: Detail
-  @State private var verify = false
+  let relogin: () -> Void
   @Environment(\.dismiss) private var dismiss
   private var model: VideoActionsModel { store.videoActions }
   private var busy: Bool { model.operation != nil || model.loading }
@@ -233,8 +280,12 @@ struct TripleSheet: View {
       Text("已完成的操作由服务器判断。投币后无法撤回。").font(.caption).foregroundStyle(.secondary)
       if let error = model.error { Text(error).font(.callout).foregroundStyle(.secondary) }
       HStack {
-        Button("刷新状态") { Task { await refresh() } }.disabled(busy)
-        if model.needsVerification { Button("完成验证") { verify = true }.disabled(busy) }
+        if model.error != nil {
+          Button("刷新状态") { Task { await refresh() } }.disabled(busy)
+          if model.needsVerification || store.api.appCoinAuthorization != nil {
+            Button("重新登录", action: relogin).disabled(busy)
+          }
+        }
         Spacer()
         Button(model.operation == "triple" ? "提交中…" : "确认三连") {
           Task { if await model.sendTriple(api: store.api) { dismiss() } }
@@ -243,7 +294,6 @@ struct TripleSheet: View {
     }.buttonStyle(.glass).padding(24).frame(width: 440).background { GlassBackdrop() }.tint(biliPink)
       .interactiveDismissDisabled(busy)
       .task { await refresh() }
-      .sheet(isPresented: $verify, onDismiss: { Task { await refresh() } }) { InteractionVerification(store: store, detail: detail) }
   }
   private func refresh() async { await model.load(detail: detail, accountID: store.account?.mid, api: store.api) }
 }

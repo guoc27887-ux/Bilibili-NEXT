@@ -21,6 +21,7 @@ This updates `Assets/Bilibili-NEXT-icon.png`, `Scripts/AppIcon.icns`, and
 `Apps/iOS/Resources/Assets.xcassets/AppIcon.appiconset/AppIcon.png`.
 Each macOS icon size is rendered directly from the SVG. Generated resources are
 checked in, so ordinary app builds do not require librsvg. Native app bundles
-use ICNS / PNG resources; the SVG files remain the editable sources.
+use ICNS / PNG resources; the SVG files remain the editable sources. The macOS
+build installs the ICNS as `AppIcon-Flat.icns` to invalidate the earlier icon cache.
 
 The earlier generated artwork is preserved in Git history.

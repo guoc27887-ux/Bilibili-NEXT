@@ -230,6 +230,7 @@ struct MobilePlayerContent: View {
   @Bindable var store: Store
   @Bindable var visit: MobileVideoVisit
   @State private var interaction: String?
+  @State private var loginAfterInteraction = false
   @State private var details = false
   @State private var danmakuList = false
   @State private var danmakuSettings = false
@@ -393,10 +394,16 @@ struct MobilePlayerContent: View {
         }
         .sheet(
           item: Binding(
-            get: { interaction.map { ActionTarget(name: $0) } }, set: { interaction = $0?.name })
+            get: { interaction.map { ActionTarget(name: $0) } }, set: { interaction = $0?.name }),
+          onDismiss: {
+            if loginAfterInteraction { loginAfterInteraction = false; store.login() }
+          }
         ) { target in
           if let detail = displayedDetail {
-            MobileInteractionSheet(store: store, detail: detail, kind: target.name)
+            MobileInteractionSheet(store: store, detail: detail, kind: target.name) {
+              loginAfterInteraction = true
+              interaction = nil
+            }
           }
         }
     }
@@ -435,64 +442,10 @@ struct MobilePlayerContent: View {
           .padding(.horizontal, 2).padding(.vertical, 6)
     }
   }
-  @ViewBuilder private func actionBar(_ detail: Detail) -> some View {
-    LazyVGrid(
-      columns: Array(repeating: GridItem(.flexible()), count: textSize.isAccessibilitySize ? 3 : 5),
-      spacing: 12
-    ) {
-      Button {
-        if store.account == nil {
-          store.login()
-        } else {
-          Task { await store.actions.toggleLike(api: store.api) }
-        }
-      } label: {
-        actionLabel(
-          "点赞", count: store.actions.counts.likes,
-          icon: store.actions.relation?.liked == true ? "hand.thumbsup.fill" : "hand.thumbsup")
-      }
-      .disabled(store.actions.operation != nil || store.actions.loading)
-      Button {
-        authenticate("coin")
-      } label: {
-        actionLabel("投币", count: store.actions.counts.coins, icon: "c.circle")
-      }
-      Button {
-        authenticate("favorite")
-      } label: {
-        actionLabel(
-          "收藏", count: store.actions.counts.favorites,
-          icon: store.actions.isFavorited ? "star.fill" : "star")
-      }
-      ShareLink(
-        item: VideoShareLink.make(
-          bvid: detail.video.bvid,
-          page: detail.pages.first { $0.id == store.playback.selectedCID }?.number ?? 1,
-          seconds: store.playback.positionSeconds)
-      ) {
-        actionLabel("分享", count: store.actions.counts.shares, icon: "square.and.arrow.up")
-      }
-      Menu {
-        Button("一键三连") { authenticate("triple") }
-        Button("稍后再看") { Task { await addLater(detail.video, store: store) } }
-        Button("官方验证") {
-          store.webTarget = WebTarget(
-            url: URL(string: "https://www.bilibili.com/video/" + detail.video.bvid)!, title: "官方验证")
-        }
-      } label: {
-        Image(systemName: "ellipsis").frame(minWidth: 44, minHeight: 48)
-      }
-    }.buttonStyle(.plain).foregroundStyle(.primary)
-    if let error = store.actions.error { Text(error).font(.caption).foregroundStyle(.secondary) }
-    if let notice = store.actions.notice { Text(notice).font(.caption).foregroundStyle(.secondary) }
+  private func actionBar(_ detail: Detail) -> some View {
+    MobileActionBar(store: store, detail: detail) { authenticate($0) }
   }
-  private func actionLabel(_ title: String, count: Int, icon: String) -> some View {
-    VStack(spacing: 6) {
-      Image(systemName: icon).font(.system(size: 20)).frame(height: 24)
-      Text(count > 0 ? compactCount(count) : title).font(.caption).monospacedDigit().lineLimit(1)
-    }.frame(maxWidth: .infinity, minHeight: 54).contentShape(Rectangle()).accessibilityLabel(
-      title + "，" + String(count))
-  }
+
   private func authenticate(_ name: String) {
     if store.account == nil { store.login() } else { interaction = name }
   }

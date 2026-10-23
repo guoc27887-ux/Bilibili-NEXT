@@ -1,8 +1,12 @@
 # Bilibili NEXT
 
+本项目面向个人学习与研究，与哔哩哔哩官方无任何关联，未获得官方授权或背书。源码采用 [MIT 协议](LICENSE)，用途说明不限制 MIT 的授权范围；第三方组件与参考项目见 [THIRD_PARTY.md](THIRD_PARTY.md)。
+
+macOS 新手指南和更新说明可从“帮助”菜单或“设置 → 关于”打开；首次安装或相应版本首次启动会自动展示一次。完整记录见 [CHANGELOG.md](CHANGELOG.md)。
+
 <img src="Assets/Bilibili-NEXT-macOS.svg" width="128" alt="Bilibili NEXT icon">
 
-面向 macOS 26+、iOS / iPadOS 26+ 的非官方哔哩哔哩客户端，主要使用 SwiftUI、Liquid Glass 和 AVPlayer。macOS 已发布版本为 1.0.2（Apple silicon）；iOS 当前为 0.1.0 开发预览，源码与构建方法见下方。
+面向 macOS 26+、iOS / iPadOS 26+ 的非官方哔哩哔哩客户端，主要使用 SwiftUI、Liquid Glass 和 AVPlayer。本次双端发布包含 macOS 1.1.0（Apple silicon）与 iOS / iPadOS 0.1.0 开发预览（需要自签的 IPA）。
 
 从 [GitHub Releases](https://github.com/wzk112/Bilibili-NEXT/releases/latest) 下载 Apple silicon 发布包，解压后将 `Bilibili NEXT.app` 放入应用程序目录。扫码登录后，登录信息保存在 macOS 钥匙串。开发构建使用本机已有的 Apple Development 签名；从早期临时签名版本迁移时，系统可能要求重新授权一次。
 
@@ -10,7 +14,7 @@
 
 ## 使用
 
-本地开发版新增：31 个视频主分区；播放页相关推荐、标签、合集与列表队列、自动下一集、循环、字幕、章节和进度缩略图；视频与用户搜索、排序、时长与日期筛选、搜索历史和联想；收藏夹编辑与批量管理、稍后再看移除与已看完清理；动态点赞、转发与图文发布；评论图片、表情选择；私信表情、图片发送和两分钟内撤回；弹幕列表、历史与云端屏蔽规则、可选的本机人物防挡；推荐反馈、举报与黑名单。实际可用内容取决于视频、登录权限和官方接口。画中画入口显示系统 AVPlayer 控件，再使用系统画中画按钮。
+macOS 功能：31 个视频主分区；播放页相关推荐、标签、合集与列表队列、自动下一集、循环、字幕、章节和进度缩略图；视频与用户搜索、排序、时长与日期筛选、搜索历史和联想；收藏夹编辑与批量管理、稍后再看移除与已看完清理；动态点赞、转发与图文发布；评论图片、表情选择；私信表情、图片发送和两分钟内撤回；弹幕列表、历史与云端屏蔽规则、可选的本机人物防挡；推荐反馈、举报与黑名单。实际可用内容取决于视频、登录权限和官方接口。画中画入口显示系统 AVPlayer 控件，再使用系统画中画按钮。
 
 私信使用每个会话独立的滚动位置，加载历史时保持当前阅读位置；会话分页使用服务端最后一条记录的时间戳，重复分页或网络失败会显示提示。人物防挡默认关闭，使用本机 Vision 分割，开启时会增加播放处理开销；与网页端算法不完全相同。表情图片目前显示静态帧。分区沿用当前网页公开的主分区，未启用的子分类不显示。
 
@@ -60,7 +64,7 @@ swift test --package-path Vendor/BiliKitCore
 Scripts/build-app.sh
 ```
 
-提交源码后可运行 `Scripts/package-release.sh` 生成 ZIP、DMG、源码包和校验值。完整开发约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+提交源码后可运行 `Scripts/package-release.sh` 生成 macOS ZIP、DMG、未签名 iOS IPA、源码包和 SHA-256 校验值。完整开发约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 构建脚本优先选择本机 Apple Development 签名；可通过 `SIGNING_IDENTITY` 指定已有签名身份。没有可用身份时使用临时签名，此时重新构建可能再次触发钥匙串授权。不要在多次构建中交替更换签名身份。
 
@@ -76,9 +80,11 @@ Scripts/build-app.sh
 
 两端采用统一的扁平化 SVG 图标，[矢量源文件与资源生成方法](Assets/ICON.md) 随源码提供。具体测试和未覆盖功能见 [QA.md](QA.md)，版本说明见 [RELEASE_NOTES.md](RELEASE_NOTES.md)。
 
-## iOS 开发预览
+## iOS 开发预览与 IPA 安装
 
 <img src="Assets/Bilibili-NEXT-iOS.svg" width="112" alt="Bilibili NEXT iOS icon">
+
+从 [v1.1.0 双端发布页](https://github.com/wzk112/Bilibili-NEXT/releases/tag/v1.1.0) 下载 `Bilibili-NEXT-0.1.0-iOS-unsigned.ipa`。**此 IPA 未签名，需要自行签名后安装，不能直接点击安装。** 使用自己的 Apple Account / 开发者证书和适用的描述文件完成签名；开发签名按系统提示启用开发者模式并信任开发者。签名有效期、设备限制和续签要求由自己的签名方式决定。当前没有 TestFlight / App Store 版本。安装与构建说明见 [IOS_INSTALL.md](IOS_INSTALL.md)。
 
 已有独立的原生 iOS Xcode 工程：[Apps/iOS/BilibiliNEXT.xcodeproj](Apps/iOS/BilibiliNEXT.xcodeproj)。当前实现、真机验证和待迁移功能见 [IOS_STATUS.md](IOS_STATUS.md)；完整目标范围见 [IOS_APP_PLAN.md](IOS_APP_PLAN.md)。
 
@@ -90,4 +96,4 @@ Scripts/build-ios.sh
 IOS_PLATFORM=device DEVELOPMENT_TEAM=YOUR_TEAM IOS_DEVICE_ID=YOUR_UDID Scripts/build-ios.sh
 ```
 
-也可在 Xcode 打开工程，选择 `BilibiliNEXT` Scheme。工程可通过 `python3 Scripts/generate-ios-project.py` 重新生成。当前没有 TestFlight / App Store 版本；已发布的 macOS 安装包不会随源码更新自动替换。
+也可在 Xcode 打开工程，选择 `BilibiliNEXT` Scheme。工程可通过 `python3 Scripts/generate-ios-project.py` 重新生成。两端安装包均需手动下载更新；源码更新不会自动替换已安装的应用。

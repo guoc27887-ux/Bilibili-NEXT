@@ -11,6 +11,14 @@ enum AppLayout {
   static let pageTitle: Font = .system(size: 28, weight: .bold)
 }
 
+/// Neutral press feedback without inheriting the window's accent tint.
+struct NavigationButtonStyle: ButtonStyle {
+  func makeBody(configuration: Configuration) -> some View {
+    configuration.label.foregroundStyle(.primary)
+      .opacity(configuration.isPressed ? 0.72 : 1)
+  }
+}
+
 extension View {
   func floatingGlass(_ radius: CGFloat = 22) -> some View { appGlass(radius, tint: .primary.opacity(0.035)) }
   func appGlass(_ radius: CGFloat = 14, tint: Color = .clear, interactive: Bool = false) -> some View {
@@ -96,6 +104,7 @@ actor BackgroundImages {
   private var cached: (URL, CGImage)?
   private var rendered: (BackgroundRequest, CGImage)?
   private let context = CIContext(options: [.useSoftwareRenderer: true, .cacheIntermediates: false])
+  func trimMemory() { cached = nil; rendered = nil; context.clearCaches() }
   func render(_ request: BackgroundRequest) throws -> CGImage {
     try Task.checkCancellation()
     if let rendered, rendered.0 == request { return rendered.1 }

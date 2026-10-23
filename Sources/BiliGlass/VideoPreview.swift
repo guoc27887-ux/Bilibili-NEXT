@@ -39,6 +39,7 @@ actor PreviewSheets {
   private let cache = NSCache<NSURL, PreviewSheet>()
   private var tasks: [URL: Task<PreviewSheet, Error>] = [:]
   init() { cache.totalCostLimit = 32 * 1024 * 1024; cache.countLimit = 4 }
+  func trimMemory() { cache.removeAllObjects() }
   func image(_ url: URL) async throws -> PreviewSheet {
     if let image = cache.object(forKey: url as NSURL) { return image }
     if let task = tasks[url] { return try await task.value }

@@ -16,6 +16,7 @@ enum AppPaths {
   static var transfers: URL { support.appendingPathComponent("Transfers") }
 }
 struct PreferencesView: View {
+  @Bindable var store: Store
   @AppStorage("appearance") private var appearance = "dark"
   @AppStorage("glassStyle") private var glassStyle = "clear"
   @AppStorage("backgroundImage") private var backgroundImage = ""
@@ -42,7 +43,6 @@ struct PreferencesView: View {
   @AppStorage("danmakuDuration") private var duration = 8.0
   @AppStorage("cacheDirectory") private var cacheDirectory = ""
   @State private var cleared = false
-  @State private var tab = 0
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
   private let categories = [("外观与交互", "paintpalette"), ("播放与网络", "play.rectangle"), ("弹幕", "text.bubble"), ("缓存与下载", "arrow.down.circle"), ("关于", "info.circle")]
   var body: some View {
@@ -54,12 +54,12 @@ struct PreferencesView: View {
           GlassEffectContainer(spacing: 8) {
             VStack(spacing: 8) {
               ForEach(categories.indices, id: \.self) { index in
-                Button { withAnimation(reduceMotion || !animations ? nil : .smooth(duration: 0.22)) { tab = index } } label: {
+                Button { store.preferencesTab = index } label: {
                   Label(categories[index].0, systemImage: categories[index].1)
-                    .font(.body.weight(tab == index ? .semibold : .regular))
+                    .font(.body.weight(store.preferencesTab == index ? .semibold : .regular))
                     .frame(maxWidth: .infinity, alignment: .leading).padding(12).contentShape(.rect(cornerRadius: 14))
-                }.buttonStyle(.plain)
-                  .appGlass(14, tint: tab == index ? biliPink.opacity(0.2) : .clear, interactive: true)
+                }.buttonStyle(NavigationButtonStyle()).tint(.primary)
+                  .appGlass(14, tint: store.preferencesTab == index ? biliPink.opacity(0.2) : .clear)
               }
             }
           }
@@ -67,18 +67,19 @@ struct PreferencesView: View {
           Text("Bilibili NEXT").font(.caption.weight(.medium)).foregroundStyle(.secondary).padding(.horizontal, 10)
         }.padding(14).frame(width: 200).frame(maxHeight: .infinity).floatingGlass(AppLayout.panelRadius)
         VStack(alignment: .leading, spacing: 16) {
-          Text(categories[tab].0).font(.title2.weight(.semibold)).padding(.horizontal, 6).padding(.top, 4)
+          Text(categories[store.preferencesTab].0).font(.title2.weight(.semibold)).padding(.horizontal, 6).padding(.top, 4)
           ScrollView {
             GlassEffectContainer(spacing: 16) {
               VStack(alignment: .leading, spacing: 16) {
-                switch tab {
+                switch store.preferencesTab {
                 case 0: appearanceSettings
                 case 1: playbackSettings
                 case 2: danmakuSettings
                 case 3: cacheSettings
                 default: aboutSettings
                 }
-              }.padding(AppLayout.pageInset).id(tab).transition(.opacity)
+              }.padding(AppLayout.pageInset).id(store.preferencesTab).transition(.opacity)
+                .animation(reduceMotion || !animations ? nil : .smooth(duration: 0.22), value: store.preferencesTab)
             }
           }.scrollIndicators(.hidden).clipShape(.rect(cornerRadius: 24))
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -151,7 +152,7 @@ struct PreferencesView: View {
           Spacer()
           Button(importing ? "正在处理…" : "选择图片…", action: chooseBackground).disabled(importing)
           if !backgroundImage.isEmpty { Button("恢复默认") { backgroundImage = "" } }
-        }.buttonStyle(.glass)
+        }.buttonStyle(.glass).tint(.primary)
         toggleRow("模糊背景图片", value: $backgroundBlur).disabled(backgroundImage.isEmpty)
         sliderRow("背景可见度", value: $backgroundOpacity, range: 0.2...1, step: 0.05, display: "\(Int(backgroundOpacity * 100))%")
           .disabled(backgroundImage.isEmpty)
@@ -234,7 +235,7 @@ struct PreferencesView: View {
               at: AppPaths.cache, withIntermediateDirectories: true)
             NSWorkspace.shared.open(AppPaths.cache)
           }
-        }.buttonStyle(.glass)
+        }.buttonStyle(.glass).tint(.primary)
         Text("修改目录后，新缓存保存到新位置，已有缓存仍可在下载页管理。").font(.caption).foregroundStyle(.secondary)
       }
       section("图片缓存") {
@@ -243,18 +244,10 @@ struct PreferencesView: View {
             await ThumbnailCache.shared.clear()
             cleared = true
           }
-        }.buttonStyle(.glass)
-        Text("内存缓存上限 32 MB，磁盘上限 128 MB。").font(.caption).foregroundStyle(.secondary)
+        }.buttonStyle(.glass).tint(.primary)
+        Text("解码图片缓存上限 32 MB，按显示尺寸加载；原图仅使用 128 MB 磁盘缓存。正在显示的图片另占内存。").font(.caption).foregroundStyle(.secondary)
       }
     }
   }
-  private var aboutSettings: some View {
-    section("Bilibili NEXT") {
-      HStack { Text("版本"); Spacer(); Text(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "开发版").foregroundStyle(.secondary) }
-      HStack { Text("系统"); Spacer(); Text("macOS 26 及以上").foregroundStyle(.secondary) }
-      Text("非官方哔哩哔哩客户端").foregroundStyle(.secondary)
-      Link("开源播放组件 BiliKit", destination: URL(string: "https://github.com/shiinayane/BiliKit-Mac")!)
-        .foregroundStyle(.primary)
-    }
-  }
+  private var aboutSettings: some View { AboutView(store: store) }
 }

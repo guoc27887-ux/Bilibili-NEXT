@@ -4,7 +4,7 @@ project_dir="${0:A:h:h}"
 cd "$project_dir"
 bin_dir="$(swift build -c release --show-bin-path)"
 swift build -c release
-app_dir="$project_dir/../Bilibili NEXT.app"
+app_dir="${APP_DIR:-$project_dir/../Bilibili NEXT.app}"
 mkdir -p "$app_dir/Contents/MacOS" "$app_dir/Contents/Resources"
 cp "$bin_dir/BiliGlass" "$app_dir/Contents/MacOS/BiliGlass.new"
 mv -f "$app_dir/Contents/MacOS/BiliGlass.new" "$app_dir/Contents/MacOS/BiliGlass"
@@ -16,19 +16,21 @@ cat > "$app_dir/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIdentifier</key><string>local.BiliGlass</string>
 <key>CFBundleName</key><string>Bilibili NEXT</string>
 <key>CFBundleDisplayName</key><string>Bilibili NEXT</string>
-<key>CFBundleIconFile</key><string>AppIcon</string>
+<key>CFBundleIconFile</key><string>AppIcon-Flat</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.0.2</string>
-<key>CFBundleVersion</key><string>9</string>
+<key>CFBundleShortVersionString</key><string>1.1.0</string>
+<key>CFBundleVersion</key><string>11</string>
 <key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>NSHighResolutionCapable</key><true/>
 <key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>
 </dict></plist>
 PLIST
-cp Scripts/AppIcon.icns "$app_dir/Contents/Resources/AppIcon.icns"
+cp Scripts/AppIcon.icns "$app_dir/Contents/Resources/AppIcon-Flat.icns"
+rm -f "$app_dir/Contents/Resources/AppIcon.icns"
 cp Vendor/BiliKitCore/LICENSE "$app_dir/Contents/Resources/BiliKit-LICENSE.txt"
 cp LICENSE "$app_dir/Contents/Resources/LICENSE.txt"
 cp THIRD_PARTY.md "$app_dir/Contents/Resources/THIRD_PARTY.md"
+cp CHANGELOG.md "$app_dir/Contents/Resources/CHANGELOG.md"
 signing_identity="${SIGNING_IDENTITY:-$(security find-identity -v -p codesigning | awk '/Apple Development/ {print $2; exit}')}"
 if [[ -z "$signing_identity" ]]; then signing_identity="-"; fi
 codesign --force --sign "$signing_identity" --timestamp=none --options runtime "$app_dir"

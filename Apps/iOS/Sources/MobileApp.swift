@@ -73,9 +73,14 @@ struct WebTarget: Identifiable {
   var qrImage: CGImage?
   var loginStatus = ""
   var loginExpired = false
+  var loginCompletion = UUID()
   var history: [HistoryEntry] = []
   var queue: [PlaybackQueueItem] = []
   private var loginTask: Task<Void, Never>?
+  private var loginCode: String?
+  private var loginDeadline = Date.distantPast
+  private var loginGeneration = UUID()
+  private var loginPaused = false
   private var qaTask: Task<Void, Never>?
   private var qaTransferSamples: [[String: Any]] = []
   private var audioTask: Task<Void, Never>?
@@ -171,7 +176,7 @@ struct WebTarget: Identifiable {
     account = try? await api.nav()
     restoring = false
     let args = ProcessInfo.processInfo.arguments
-    var qa = false
+    var qa = args.contains("--qa-capture")
     #if DEBUG
       if let i = args.firstIndex(of: "--qa-connections"), args.indices.contains(i + 1), let count = Int(args[i + 1]) { playback.connectionOverride = max(1, min(32, count)) }
       if let i = args.firstIndex(of: "--qa-fixture"), args.indices.contains(i + 1),
@@ -382,56 +387,95 @@ struct WebTarget: Identifiable {
     refreshQR()
   }
   func refreshQR() {
-    loginTask?.cancel()
-    qrImage = nil
+    closeLogin()
     loginExpired = false
     loginStatus = "正在获取二维码"
+    loginGeneration = api.authenticationGeneration
     loginTask = Task {
       do {
-        let data = try await api.request("/x/passport-login/web/qrcode/generate")
+        let qr = try await api.appCoinQRCode()
         try Task.checkCancellation()
-        guard let text = data["url"] as? String, let key = data["qrcode_key"] as? String else {
-          throw BiliError(text: "无法读取二维码")
-        }
+        guard loginGeneration == api.authenticationGeneration else { throw CancellationError() }
         let filter = CIFilter.qrCodeGenerator()
-        filter.message = Data(text.utf8)
-        if let image = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)) {
-          qrImage = CIContext().createCGImage(image, from: image.extent)
+        filter.message = Data(qr.url.utf8)
+        guard let image = filter.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)),
+          let rendered = CIContext().createCGImage(image, from: image.extent) else {
+          throw BiliError(text: "二维码生成失败，请刷新")
         }
-        loginStatus = "使用另一台设备上的哔哩哔哩 App 扫码"
-        for sample in 0..<90 {
-          try await Task.sleep(for: .seconds(2))
-          try Task.checkCancellation()
-          let result = try await api.request(
-            "/x/passport-login/web/qrcode/poll", ["qrcode_key": key])
-          try Task.checkCancellation()
-          switch result["code"] as? Int {
-          case 0:
-            account = try await api.nav()
-            showLogin = false
-            actions.clear()
-            return
-          case 86090: loginStatus = "请在哔哩哔哩 App 中确认"
-          case 86038:
-            loginExpired = true
-            loginStatus = "二维码已过期"
-            return
-          default: break
-          }
-        }
-        loginExpired = true
-        loginStatus = "二维码已过期"
+        qrImage = rendered
+        loginCode = qr.code
+        loginDeadline = Date().addingTimeInterval(180)
+        await pollLogin(code: qr.code)
       } catch {
-        if !Task.isCancelled {
-          loginStatus = error.localizedDescription
-          loginExpired = true
-        }
+        guard !Task.isCancelled else { return }
+        loginStatus = error.localizedDescription
+        loginExpired = true
       }
+    }
+  }
+  // Keep the same QR challenge while the user switches to the official app to scan it.
+  func pauseLogin() {
+    guard showLogin, !loginExpired else { return }
+    loginPaused = true
+    loginTask?.cancel()
+    loginTask = nil
+  }
+  func resumeLogin() {
+    guard showLogin, loginPaused else { return }
+    loginPaused = false
+    guard let code = loginCode else { refreshQR(); return }
+    loginTask = Task { await pollLogin(code: code) }
+  }
+  private func pollLogin(code: String) async {
+    while !Task.isCancelled, loginGeneration == api.authenticationGeneration, loginCode == code {
+      guard Date() < loginDeadline else {
+        loginExpired = true; loginStatus = "二维码已过期，请刷新后重新扫码"; return
+      }
+      do {
+        if let login = try await api.pollClientLogin(code) {
+          try Task.checkCancellation()
+          guard loginGeneration == api.authenticationGeneration, loginCode == code else { return }
+          try api.saveClientLogin(login)
+          let mid = login.appCoinAuthorization!.accountID
+          account = Account(name: account?.mid == mid ? account!.name : "已登录", mid: mid,
+            face: account?.mid == mid ? account!.face : "")
+          actions.clear(); inbox.clear(); accountHistory.reset(); historySync.reset()
+          favoriteRevision += 1
+          loginStatus = "已登录"
+          qrImage = nil; loginCode = nil
+          showLogin = false
+          loginCompletion = UUID()
+          let savedGeneration = api.authenticationGeneration
+          Task { [weak self] in
+            guard let self, let profile = try? await self.api.nav(),
+              self.api.authenticationGeneration == savedGeneration else { return }
+            self.account = profile
+          }
+          return
+        }
+        loginStatus = "使用哔哩哔哩 App 扫码，并确认登录"
+      } catch {
+        guard !Task.isCancelled else { return }
+        let network = error as NSError
+        let retryable = network.domain == NSURLErrorDomain && [
+          NSURLErrorTimedOut, NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost,
+          NSURLErrorNetworkConnectionLost, NSURLErrorDNSLookupFailed,
+          NSURLErrorNotConnectedToInternet, NSURLErrorDataNotAllowed, NSURLErrorCancelled,
+        ].contains(network.code)
+        guard retryable else {
+          loginStatus = error.localizedDescription; loginExpired = true; return
+        }
+        loginStatus = "连接暂时中断，正在恢复登录确认…"
+      }
+      do { try await Task.sleep(for: .seconds(2)) } catch { return }
     }
   }
   func closeLogin() {
     loginTask?.cancel()
     loginTask = nil
+    qrImage = nil
+    loginCode = nil
+    loginPaused = false
   }
   func logout() {
     closeLogin()
@@ -459,6 +503,9 @@ struct WebTarget: Identifiable {
       "specialScripts": specialScripts, "specialLayers": specialLayers,
       "unsupportedScripts": unsupportedScripts,
     ]
+    state["signedIn"] = api.signedIn
+    state["clientAuthorizationPresent"] = api.appCoinAuthorization != nil
+    state["clientAuthorizationValid"] = api.appCoinAuthorization?.isValid(for: api.cookies["DedeUserID"]) == true
     state["network"] = await playback.networkStats()
     state["transfers"] = await playback.transferStats()
     state["danmakuPerformance"] = danmakuPerformance

@@ -3,6 +3,117 @@ import XCTest
 @MainActor final class MobileSmokeTests: XCTestCase {
   override func setUpWithError() throws { continueAfterFailure = false }
 
+  private func interactionApp(_ extra: [String] = []) -> XCUIApplication {
+    let app = XCUIApplication()
+    app.launchArguments = ["--qa-ui", "--qa-navigation", "--qa-app-coins"] + extra
+    app.launch()
+    XCTAssertTrue(app.buttons["video-coin"].waitForExistence(timeout: 15))
+    return app
+  }
+
+  func testClientCoinFlowUpdatesLimitsWithoutVerificationButtons() {
+    let app = interactionApp()
+    app.buttons["video-coin"].tap()
+    let submit = app.buttons["submit-coins"]
+    XCTAssertTrue(submit.waitForExistence(timeout: 8))
+    XCTAssertTrue(submit.isEnabled)
+    XCTAssertFalse(app.buttons["官方验证"].exists)
+    XCTAssertFalse(app.buttons["重新登录"].exists)
+    submit.tap()
+    XCTAssertTrue(app.staticTexts["已投 1 枚硬币"].waitForExistence(timeout: 8))
+    app.buttons["video-coin"].tap()
+    XCTAssertTrue(app.buttons["submit-coins"].waitForExistence(timeout: 8))
+    XCTAssertFalse(app.buttons["coin-amount-2"].isEnabled)
+    XCTAssertTrue(app.staticTexts["已投 1 枚，本次最多投 1 枚"].waitForExistence(timeout: 5))
+    attach("client-coin-confirmed", app: app)
+    app.buttons["submit-coins"].tap()
+    XCTAssertTrue(app.buttons["video-coin"].waitForExistence(timeout: 8))
+    app.buttons["video-coin"].tap()
+    XCTAssertTrue(app.staticTexts["本视频已投满"].waitForExistence(timeout: 8))
+    XCTAssertFalse(app.buttons["submit-coins"].isEnabled)
+  }
+
+  func testExpiredClientLoginOpensUnifiedQRAndCancelPreservesAccount() {
+    let app = interactionApp(["--qa-token-expired"])
+    app.buttons["video-coin"].tap()
+    XCTAssertTrue(app.buttons["submit-coins"].waitForExistence(timeout: 8))
+    app.buttons["submit-coins"].tap()
+    XCTAssertTrue(app.staticTexts["请重新登录后再试"].waitForExistence(timeout: 8))
+    XCTAssertFalse(app.buttons["官方验证"].exists)
+    for _ in 0..<4 {
+      if app.buttons["interaction-relogin"].isHittable { break }
+      app.collectionViews.firstMatch.swipeUp()
+    }
+    app.buttons["interaction-relogin"].tap()
+    XCTAssertTrue(app.buttons["保存二维码到相册"].waitForExistence(timeout: 8))
+    XCTAssertTrue(app.staticTexts["使用哔哩哔哩 App 扫码，并确认登录"].waitForExistence(timeout: 8))
+    attach("client-login-qr", app: app)
+    app.buttons["关闭"].tap()
+    XCTAssertTrue(app.buttons["video-coin"].waitForExistence(timeout: 8))
+    app.buttons["video-coin"].tap()
+    XCTAssertTrue(app.buttons["submit-coins"].waitForExistence(timeout: 8))
+    XCTAssertFalse(app.staticTexts["登录哔哩哔哩"].exists)
+  }
+
+  func testQRLoginRecoversNetworkLossAndBackgroundWithoutReplacingCode() {
+    let app = interactionApp(["--qa-token-expired", "--qa-login-network-loss"])
+    app.buttons["video-coin"].tap()
+    XCTAssertTrue(app.buttons["submit-coins"].waitForExistence(timeout: 8))
+    app.buttons["submit-coins"].tap()
+    for _ in 0..<4 {
+      if app.buttons["interaction-relogin"].isHittable { break }
+      app.collectionViews.firstMatch.swipeUp()
+    }
+    app.buttons["interaction-relogin"].tap()
+    XCTAssertTrue(app.staticTexts["连接暂时中断，正在恢复登录确认…"].waitForExistence(timeout: 8))
+    let waiting = app.staticTexts["使用哔哩哔哩 App 扫码，并确认登录"]
+    XCTAssertTrue(waiting.waitForExistence(timeout: 8))
+    XCUIDevice.shared.press(.home)
+    app.activate()
+    XCTAssertTrue(waiting.waitForExistence(timeout: 8))
+    XCTAssertTrue(app.buttons["保存二维码到相册"].isEnabled)
+    XCTAssertFalse(app.buttons["刷新二维码"].exists)
+    attach("qr-login-resumed", app: app)
+    app.buttons["关闭"].tap()
+  }
+
+  func testTripleHoldCancelsOnReleaseAndCompletesWithoutExtraLike() {
+    let app = interactionApp()
+    let like = app.buttons["video-like"]
+    XCTAssertTrue(like.waitForExistence(timeout: 8))
+    like.tap()
+    if !app.staticTexts["已点赞"].waitForExistence(timeout: 5) { print(app.debugDescription) }
+    XCTAssertTrue(app.staticTexts["已点赞"].exists)
+    XCTAssertEqual(like.value as? String, "1")
+    like.tap()
+    XCTAssertTrue(app.staticTexts["已取消点赞"].waitForExistence(timeout: 5))
+    XCTAssertEqual(like.value as? String, "0")
+    like.press(forDuration: 0.6)
+    XCTAssertTrue(app.staticTexts["已取消点赞"].exists)
+    XCTAssertFalse(app.staticTexts["triple-progress"].exists)
+    XCTAssertEqual(like.value as? String, "0")
+    like.press(forDuration: 1.5)
+    XCTAssertTrue(app.staticTexts["已三连"].waitForExistence(timeout: 8))
+    XCTAssertEqual(app.buttons["video-like"].value as? String, "1")
+    app.buttons["video-coin"].tap()
+    XCTAssertTrue(app.staticTexts["本视频已投满"].waitForExistence(timeout: 8))
+    XCTAssertFalse(app.buttons["submit-coins"].isEnabled)
+    attach("triple-hold-confirmed", app: app)
+  }
+
+  func testCoinTimeoutRequiresRefreshBeforeAnotherSubmission() {
+    let app = interactionApp(["--qa-coin-timeout"])
+    app.buttons["video-coin"].tap()
+    XCTAssertTrue(app.buttons["submit-coins"].waitForExistence(timeout: 8))
+    app.buttons["submit-coins"].tap()
+    XCTAssertTrue(app.staticTexts["投币结果未确认，请刷新状态后再操作"].waitForExistence(timeout: 8))
+    XCTAssertFalse(app.buttons["submit-coins"].isEnabled)
+    XCTAssertTrue(app.buttons["刷新状态"].isEnabled)
+    XCTAssertTrue(app.buttons["重新登录"].exists)
+    XCTAssertFalse(app.buttons["官方验证"].exists)
+    attach("coin-uncertain-state", app: app)
+  }
+
   func testNavigationSearchAndLocalHistory() throws {
     let app = XCUIApplication()
     app.launch()

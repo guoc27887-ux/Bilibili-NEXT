@@ -177,16 +177,17 @@ actor PlaybackDiskCache: HTTPRangeStreaming {
     let task = Task<Page, Error> { [source, permits] in
       if video { try await permits.acquire(foreground: foreground) }
       do {
-        let buffer = DiskPageBuffer()
+        let buffer = try DiskPageWriter(file: file)
+        defer { buffer.close() }
         var retries = 0
-        while await buffer.byteCount < range.length {
-          let remaining = try await HTTPByteRange(start: range.start + Int64(buffer.byteCount), endInclusive: range.endInclusive)
+        while buffer.byteCount < range.length {
+          let remaining = try HTTPByteRange(start: range.start + Int64(buffer.byteCount), endInclusive: range.endInclusive)
           do {
             _ = try await source.stream(from: url, rangeHeader: remaining.headerValue, expectedRange: remaining,
               expectedCompleteLength: track.length, headers: track.headers, allowedContentTypes: track.types,
-              requiresContentLength: true, onResponse: { try await buffer.header($0) },
-              onChunk: { try await buffer.append($0) })
-            guard await buffer.byteCount == range.length else { throw HTTPRangeResponseError.rejectedBody }
+              requiresContentLength: true, onResponse: { try buffer.header($0) },
+              onChunk: { try buffer.append($0) })
+            guard buffer.byteCount == range.length else { throw HTTPRangeResponseError.rejectedBody }
           } catch {
             try Task.checkCancellation()
             guard retries < 3, ParallelVideoStream.canResume(error) else { throw error }
@@ -196,8 +197,7 @@ actor PlaybackDiskCache: HTTPRangeStreaming {
           }
         }
         try Task.checkCancellation()
-        let (data, response) = try await buffer.complete(length: range.length)
-        try data.write(to: file, options: .atomic)
+        let response = try buffer.complete(length: range.length)
         if video { await permits.release(succeeded: true) }
         return Page(file: file, response: response)
       } catch {
@@ -261,24 +261,45 @@ actor PlaybackDiskCache: HTTPRangeStreaming {
   private func finishedWorker(_ url: URL) { workers[url] = nil }
 
 }
-private actor DiskPageBuffer {
-  var response: HTTPRangeStreamResponse?
-  var data = Data()
-  var byteCount: UInt64 { UInt64(data.count) }
-  func header(_ response: HTTPRangeStreamResponse) throws {
+/// Stream each validated prefix to a private partial file. The completed page is
+/// published only after length validation. No 1 MiB Data buffer per connection.
+final class DiskPageWriter: @unchecked Sendable {
+  private let lock = NSLock()
+  private let file: URL
+  private let partial: URL
+  private let handle: FileHandle
+  private var response: HTTPRangeStreamResponse?
+  private var received: UInt64 = 0
+  private var closed = false
+  var byteCount: UInt64 { lock.withLock { received } }
+  init(file: URL) throws {
+    self.file = file
+    partial = file.appendingPathExtension("partial")
+    guard FileManager.default.createFile(atPath: partial.path, contents: nil) else { throw CocoaError(.fileWriteUnknown) }
+    handle = try FileHandle(forWritingTo: partial)
+  }
+  func header(_ response: HTTPRangeStreamResponse) throws { try lock.withLock {
     if let previous = self.response {
       guard previous.contentRange.completeLength == response.contentRange.completeLength,
         previous.contentType == response.contentType else { throw HTTPRangeResponseError.rejectedBody }
     } else { self.response = response }
-  }
-  func append(_ bytes: Data) throws {
-    guard data.count + bytes.count <= PlaybackDiskCache.pageSize else { throw HTTPRangeResponseError.rejectedBody }
-    data.append(bytes)
-  }
-  func complete(length: UInt64) throws -> (Data, HTTPRangeStreamResponse) {
-    guard let response, UInt64(data.count) == length else { throw HTTPRangeResponseError.rejectedBody }
-    return (data, response)
-  }
+  } }
+  func append(_ bytes: Data) throws { try lock.withLock {
+    guard !closed, received + UInt64(bytes.count) <= PlaybackDiskCache.pageSize else { throw HTTPRangeResponseError.rejectedBody }
+    try handle.write(contentsOf: bytes)
+    received += UInt64(bytes.count)
+  } }
+  func complete(length: UInt64) throws -> HTTPRangeStreamResponse { try lock.withLock {
+    guard !closed, let response, received == length else { throw HTTPRangeResponseError.rejectedBody }
+    try handle.close(); closed = true
+    try FileManager.default.moveItem(at: partial, to: file)
+    return response
+  } }
+  func close() { lock.withLock {
+    if !closed { try? handle.close(); closed = true }
+    try? FileManager.default.removeItem(at: partial)
+  } }
+  deinit { close() }
 }
 enum PlaybackTemporaryFiles {
   static var root: URL { FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("BiliGlass/Playback", isDirectory: true) }

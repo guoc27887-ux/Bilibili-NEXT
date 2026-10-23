@@ -8,6 +8,7 @@ The `Vendor/BiliKitCore` directory contains the BiliModels, BiliApplication, Bil
 The app UI, API adapter, session storage, download manager and playback lifecycle are implemented separately for Bilibili NEXT.
 
 References consulted, no code copied:
+- LyricsX Next (MPL-2.0): https://github.com/wzk112/LyricsX-Next — first-run versus upgrade detection, version/revision receipts, and guide reopening behavior informed an independent Bilibili NEXT guide. No LyricsX source or artwork is bundled.
 - Bilibili-thread-ripper (MIT), commit `ee3adaa8cc1afbb29a3d7153e1295e09e42b29e2`: https://github.com/MrTangLuyao/Bilibili-thread-ripper — partial-prefix resume, bounded pieces, shared connection scheduling and CDN recovery informed the independent Swift implementation. The Electron UI and downloader JavaScript are not bundled.
 - IINA / mpv architecture: https://github.com/iina/iina
 - IINA+ DASH representation model: https://github.com/xjbeta/iina-plus

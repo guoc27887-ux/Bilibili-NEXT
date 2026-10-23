@@ -18,6 +18,9 @@ import WebKit
       let before = try await api.videoRelation(detail.aid, bvid: bvid)
       let limit = detail.copyright == 2 ? 1 : 2
       result["beforeCoins"] = before.coins; result["limit"] = limit
+      result["beforeLiked"] = before.liked; result["beforeFavorited"] = before.favorited
+      result["requestVariant"] = api.appCoinAuthorization?.isValid(for: api.cookies["DedeUserID"]) == true
+        ? "app-authorization" : "web-session"
       guard before.coins >= limit else { throw BiliError(text: "诊断已停止：视频尚未投满") }
       let arguments = ProcessInfo.processInfo.arguments
       if let i = arguments.firstIndex(of: "--coin-browser-reference-check"), arguments.indices.contains(i + 1) {
@@ -90,7 +93,9 @@ import WebKit
           showChallenge?(challenge)
         }
       }
-      result["afterCoins"] = try await api.videoRelation(detail.aid, bvid: bvid).coins
+      let after = try await api.videoRelation(detail.aid, bvid: bvid)
+      result["afterCoins"] = after.coins
+      result["afterLiked"] = after.liked; result["afterFavorited"] = after.favorited
       result["afterBalance"] = try await api.request("/x/web-interface/nav")["money"]
       result["cookieNames"] = api.cookies.keys.sorted()
     } catch { result["error"] = error.localizedDescription }

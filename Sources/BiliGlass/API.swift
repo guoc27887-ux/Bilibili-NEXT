@@ -153,11 +153,11 @@ final class Vault {
     c.timeoutIntervalForRequest = 25
     c.urlCache = nil
     session = transport ?? URLSession(configuration: c)
-    if loadCredentials, let data = Vault.load(),
-      let saved = try? JSONDecoder().decode([String: String].self, from: data)
+    if loadCredentials, let data = Vault.load(), let saved = StoredLogin.decode(data)
     {
-      cookies = saved
-      if let data = Vault.load(account: AppCoinAuthorization.vaultAccount) {
+      cookies = saved.cookies
+      appCoinAuthorization = saved.appCoinAuthorization
+      if appCoinAuthorization == nil, let data = Vault.load(account: AppCoinAuthorization.vaultAccount) {
         appCoinAuthorization = try? JSONDecoder().decode(AppCoinAuthorization.self, from: data)
       }
     }
@@ -168,10 +168,37 @@ final class Vault {
       (Vault.load(), Vault.load(account: AppCoinAuthorization.vaultAccount))
     }.value
     guard !Task.isCancelled, generation == authenticationGeneration, let data,
-      let saved = try? JSONDecoder().decode([String: String].self, from: data)
+      let saved = StoredLogin.decode(data)
     else { return }
-    cookies = saved
-    appCoinAuthorization = appData.flatMap { try? JSONDecoder().decode(AppCoinAuthorization.self, from: $0) }
+    cookies = saved.cookies
+    appCoinAuthorization = saved.appCoinAuthorization
+      ?? appData.flatMap { try? JSONDecoder().decode(AppCoinAuthorization.self, from: $0) }
+  }
+  func saveClientLogin(_ login: StoredLogin) throws {
+    guard let token = login.appCoinAuthorization, token.isValid(for: login.cookies["DedeUserID"]),
+      login.cookies["SESSDATA"] != nil, login.cookies["bili_jct"] != nil else {
+      throw BiliError(text: "登录信息不完整，保留原登录")
+    }
+    try Vault.save(JSONEncoder().encode(login))
+    navigationTask?.task.cancel(); navigationTask = nil
+    cookies = login.cookies
+    appCoinAuthorization = token
+    authenticationGeneration = UUID()
+    interactionVerification = nil
+    wbiKey = nil
+    Vault.clear(account: AppCoinAuthorization.vaultAccount)
+    WebSession.shared.reset()
+  }
+  func saveWebLogin(_ webCookies: [String: String]) throws {
+    let login = try StoredLogin.webLogin(cookies: webCookies, previous: appCoinAuthorization)
+    try Vault.save(JSONEncoder().encode(login))
+    navigationTask?.task.cancel(); navigationTask = nil
+    cookies = login.cookies
+    appCoinAuthorization = login.appCoinAuthorization
+    authenticationGeneration = UUID()
+    interactionVerification = nil
+    wbiKey = nil
+    Vault.clear(account: AppCoinAuthorization.vaultAccount)
   }
   var signedIn: Bool { cookies["SESSDATA"] != nil }
   func logout() {

@@ -84,6 +84,7 @@ struct TripleResult: Sendable {
   let coin: Bool
   let favorite: Bool
   let count: Int
+  var confirmedRelation: VideoRelation? = nil
 }
 struct CoinAvailability {
   let limit: Int
@@ -163,6 +164,9 @@ extension API {
     return result["like"] as? Bool ?? false
   }
   func tripleVideo(aid: Int, bvid: String) async throws -> TripleResult {
+    if let credential = appCoinAuthorization, credential.accountID == Int(cookies["DedeUserID"] ?? "") {
+      return try await appTriple(aid: aid, bvid: bvid, credential: credential)
+    }
     try await prepareVideoInteraction()
     let data = try await post("/x/web-interface/archive/like/triple", ["aid": String(aid)], videoBVID: bvid)
     guard let like = data["like"] as? Bool, let coin = data["coin"] as? Bool,
@@ -279,9 +283,14 @@ extension API {
       if result.like && !before.liked { relation?.liked = true; counts.likes += 1 }
       if result.coin { relation?.coins += result.count; counts.coins += result.count }
       if result.favorite && !before.favorited { relation?.favorited = true; favoriteOverride = true; counts.favorites += 1 }
+      if let confirmed = result.confirmedRelation {
+        relation = confirmed
+        favoriteOverride = confirmed.favorited
+      }
       let complete = relation?.liked == true && (relation?.coins ?? 0) > 0 && relation?.favorited == true
-      notice = complete ? "已三连" : "已完成部分操作，请查看互动状态"
-      if !complete { error = "三连未全部完成；已成功的操作已保留，请刷新状态后查看" }
+      notice = complete ? "已三连" : result.confirmedRelation != nil ? "已提交，状态暂未同步，请稍后刷新" : "已完成部分操作，请查看互动状态"
+      if !complete && result.confirmedRelation == nil { error = "三连未全部完成；已成功的操作已保留，请刷新状态后查看" }
+      if !complete && result.confirmedRelation != nil { relation = nil }
       return complete
     } catch {
       guard token == revision, session == api.authenticationGeneration else { return false }

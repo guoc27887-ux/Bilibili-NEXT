@@ -1,7 +1,24 @@
 import SwiftUI
 
 final class AppLifecycle: NSObject, NSApplicationDelegate {
-  func applicationDidFinishLaunching(_ notification: Notification) { PlaybackTemporaryFiles.cleanup() }
+  private var memoryPressure: DispatchSourceMemoryPressure?
+  func applicationDidFinishLaunching(_ notification: Notification) {
+    PlaybackTemporaryFiles.cleanup()
+    // Explicitly load the current resource for the running Dock tile; older
+    // locally replaced bundles may still have a cached LaunchServices icon.
+    if let iconURL = Bundle.main.url(forResource: "AppIcon-Flat", withExtension: "icns") {
+      NSApp.applicationIconImage = NSImage(contentsOf: iconURL)
+    }
+    let source = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical], queue: .main)
+    source.setEventHandler {
+      Task {
+        await ThumbnailCache.shared.trimMemory()
+        await BackgroundImages.shared.trimMemory()
+        await PreviewSheets.shared.trimMemory()
+      }
+    }
+    source.resume(); memoryPressure = source
+  }
   func applicationWillTerminate(_ notification: Notification) { PlaybackTemporaryFiles.cleanup(staleOnly: false) }
 }
 
@@ -13,6 +30,10 @@ final class AppLifecycle: NSObject, NSApplicationDelegate {
       .windowStyle(.hiddenTitleBar)
       .commands {
         CommandGroup(replacing: .newItem) {}
+        CommandGroup(replacing: .help) {
+          Button("使用指南") { store.guide.show(.tutorial) }
+          Button("更新说明") { store.guide.show(.update(previous: nil)) }
+        }
         CommandGroup(after: .toolbar) {
           Button("搜索") {
             store.searchFocus += 1
@@ -24,6 +45,6 @@ final class AppLifecycle: NSObject, NSApplicationDelegate {
           }.keyboardShortcut("r")
         }
       }
-    Settings { PreferencesView() }
+    Settings { PreferencesView(store: store) }
   }
 }

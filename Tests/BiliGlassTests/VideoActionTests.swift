@@ -54,6 +54,103 @@ private func relationResponse(_ request: URLRequest, liked: Bool = false, coins:
 }
 
 @Suite(.serialized) struct VideoActionTests {
+  @Test func unifiedLoginRequiresMatchingCookiesAndTokenAndReadsOldSessions() throws {
+    let data: [String: Any] = ["token_info": ["mid": 42, "access_token": "fixture", "expires_in": 3600],
+      "cookie_info": ["cookies": [["name": "SESSDATA", "value": "fixture-session"],
+        ["name": "bili_jct", "value": "fixture-csrf"], ["name": "DedeUserID", "value": "42"]]]]
+    let saved = try StoredLogin.parse(data)
+    let decoded = try #require(StoredLogin.decode(JSONEncoder().encode(saved)))
+    #expect(decoded.cookies["DedeUserID"] == "42")
+    #expect(decoded.appCoinAuthorization?.isValid(for: "42") == true)
+    let old = try #require(StoredLogin.decode(JSONEncoder().encode(saved.cookies)))
+    #expect(old.cookies == saved.cookies && old.appCoinAuthorization == nil)
+    var mismatch = data
+    mismatch["token_info"] = ["mid": 43, "access_token": "fixture", "expires_in": 3600]
+    #expect(throws: BiliError.self) { try StoredLogin.parse(mismatch) }
+    var incomplete = data; incomplete.removeValue(forKey: "cookie_info")
+    #expect(throws: BiliError.self) { try StoredLogin.parse(incomplete) }
+  }
+  @Test func webCookieRefreshPreservesSameAccountClientAuthorizationAcrossRestart() throws {
+    let token = AppCoinAuthorization(accountID: 42, accessToken: "fixture-token", expires: .distantFuture)
+    let cookies = ["DedeUserID": "42", "SESSDATA": "refreshed-session", "bili_jct": "refreshed-csrf", "access_key": "must-not-be-a-cookie"]
+    let login = try StoredLogin.webLogin(cookies: cookies, previous: token)
+    let restored = try #require(StoredLogin.decode(JSONEncoder().encode(login)))
+    #expect(restored.appCoinAuthorization?.accessToken == "fixture-token")
+    #expect(restored.cookies["SESSDATA"] == "refreshed-session")
+    #expect(restored.cookies["access_key"] == nil)
+    let expired = AppCoinAuthorization(accountID: 42, accessToken: "expired", expires: .distantPast)
+    // Retain expired authorization so a write asks for login instead of silently switching endpoints.
+    #expect(try StoredLogin.webLogin(cookies: cookies, previous: expired).appCoinAuthorization?.accessToken == "expired")
+  }
+  @Test func webAccountChangeDropsOtherAccountsTokenAndRejectsIncompleteCookies() throws {
+    let token = AppCoinAuthorization(accountID: 42, accessToken: "fixture-token", expires: .distantFuture)
+    let cookies = ["DedeUserID": "43", "SESSDATA": "other-session", "bili_jct": "other-csrf"]
+    #expect(try StoredLogin.webLogin(cookies: cookies, previous: token).appCoinAuthorization == nil)
+    #expect(try StoredLogin.webLogin(cookies: cookies, previous: nil).appCoinAuthorization == nil)
+    #expect(throws: BiliError.self) { try StoredLogin.webLogin(cookies: ["SESSDATA": "partial"], previous: token) }
+    var malformed = cookies; malformed["SESSDATA"] = "bad;injected=value"
+    #expect(throws: BiliError.self) { try StoredLogin.webLogin(cookies: malformed, previous: token) }
+  }
+  @Test @MainActor func initialClientLoginDoesNotRequireAnExistingWebSession() async throws {
+    let api = api(); api.cookies = [:]
+    ActionProtocol.handler = { request in
+      #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
+      #expect(request.url?.path == "/x/passport-tv-login/qrcode/auth_code")
+      return .init(json: #"{"code":0,"data":{"auth_code":"fixture","url":"https://passport.bilibili.com/fixture"}}"#)
+    }
+    #expect(try await api.appCoinQRCode().code == "fixture")
+  }
+  @Test @MainActor func appTripleWritesOnceAndCountsOnlyNewCoins() async throws {
+    let api = api(), log = RequestLog()
+    api.cookies["DedeUserID"] = "42"
+    api.appCoinAuthorization = .init(accountID: 42, accessToken: "fixture-token", expires: .distantFuture)
+    ActionProtocol.handler = { request in
+      if request.url?.path == "/x/web-interface/archive/relation" {
+        return relationResponse(request, liked: !log.values.isEmpty, coins: 1, favorite: !log.values.isEmpty)
+      }
+      #expect(request.url?.host == "app.bilibili.com" && request.url?.path == "/x/v2/view/like/triple")
+      #expect(request.value(forHTTPHeaderField: "Cookie") == nil)
+      log.append(form(request))
+      return .init(json: #"{"code":0,"data":{"like":true,"coin":true,"fav":true}}"#)
+    }
+    let result = try await api.tripleVideo(aid: 123, bvid: "BV1xx411c7mD")
+    #expect(result.like && result.favorite && !result.coin && result.count == 0)
+    #expect(log.values.count == 1 && log.values.first?["access_key"] == "fixture-token")
+  }
+  @Test @MainActor func appTripleTimeoutNeverFallsBackToThreeSeparateWrites() async {
+    let api = api(), log = RequestLog()
+    api.cookies["DedeUserID"] = "42"
+    api.appCoinAuthorization = .init(accountID: 42, accessToken: "fixture-token", expires: .distantFuture)
+    ActionProtocol.handler = { request in
+      if request.url?.path == "/x/web-interface/archive/relation" { return relationResponse(request) }
+      log.append(["path": request.url!.path]); throw URLError(.timedOut)
+    }
+    do { _ = try await api.tripleVideo(aid: 123, bvid: "BV1xx411c7mD"); Issue.record("Expected timeout") }
+    catch { #expect(error is URLError) }
+    #expect(log.values.count == 1)
+  }
+  @Test @MainActor func appTripleWaitsForLaggingRelationAndReplacesStaleLocalState() async throws {
+    let api = api(), reads = RequestLog(), writes = RequestLog(), model = VideoActionsModel()
+    api.cookies["DedeUserID"] = "42"
+    api.appCoinAuthorization = .init(accountID: 42, accessToken: "fixture-token", expires: .distantFuture)
+    ActionProtocol.handler = { request in
+      if request.url?.path == "/x/web-interface/archive/relation" {
+        reads.append(["read": "1"])
+        // First UI load is stale; the server already has both coins. The first
+        // read after the triple also lags before likes/favorites become visible.
+        return relationResponse(request, liked: reads.values.count >= 4,
+          coins: reads.values.count == 1 ? 0 : 2, favorite: reads.values.count >= 4)
+      }
+      writes.append(form(request))
+      return .init(json: #"{"code":0,"data":{"like":true,"coin":true,"fav":true}}"#)
+    }
+    await model.load(detail: detail(), accountID: 42, api: api)
+    #expect(model.relation?.coins == 0)
+    #expect(await model.sendTriple(api: api))
+    #expect(model.notice == "已三连" && model.error == nil)
+    #expect(model.relation == VideoRelation(liked: true, coins: 2, favorited: true))
+    #expect(writes.values.count == 1 && reads.values.count == 4)
+  }
   @Test func appCoinAuthorizationRejectsOtherAccountsAndIncompleteTokens() throws {
     let now = Date(timeIntervalSince1970: 1000)
     let payload: [String: Any] = ["token_info": ["mid": 42, "access_token": "fixture-token", "expires_in": 3600]]

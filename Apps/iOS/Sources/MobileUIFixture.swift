@@ -6,6 +6,11 @@
   final class MobileUIFixture: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
     private static var failed = false
+    private static var loginPollFailed = false
+    private static var qrRequests = 0
+    private static var coins = ProcessInfo.processInfo.arguments.contains("--qa-coins-full") ? 2 : 0
+    private static var liked = false
+    private static var favorited = false
     static var enabled: Bool { ProcessInfo.processInfo.arguments.contains("--qa-ui") }
     static var empty: Bool { ProcessInfo.processInfo.arguments.contains("--qa-ui-empty") }
     @MainActor static func makeAPI() -> API {
@@ -13,6 +18,10 @@
       configuration.protocolClasses = [MobileUIFixture.self]
       let api = API(loadCredentials: false, transport: URLSession(configuration: configuration))
       api.cookies = ["SESSDATA": "fixture", "bili_jct": "fixture", "DedeUserID": "1"]
+      if ProcessInfo.processInfo.arguments.contains("--qa-app-coins") {
+        api.appCoinAuthorization = .init(accountID: 1, accessToken: "local-app-fixture",
+          expires: ProcessInfo.processInfo.arguments.contains("--qa-token-expired") ? .distantPast : .distantFuture)
+      }
       return api
     }
     @MainActor static func openVideo(_ visit: MobileVideoVisit, store: Store) {
@@ -23,7 +32,8 @@
           bvid: visit.bvid,
           title: first ? "导航测试视频 A" : "导航测试视频 B", cover: "", author: "导航测试 UP 主",
           duration: 180, views: 100), description: "用于检查逐层返回、评论草稿和阅读位置。",
-        pages: [], aid: first ? 123 : 456, ownerID: 11)
+        pages: [], aid: first ? 123 : 456, ownerID: 11,
+        copyright: ProcessInfo.processInfo.arguments.contains("--qa-repost") ? 2 : 1)
       store.playback.selectedCID = 0
       store.playback.positionSeconds = visit.resume?.position ?? 42
       store.playback.isPlaying = false
@@ -68,7 +78,41 @@
         ]
       }
       var data: [String: Any] = [:]
-      if populated && path == "/x/web-interface/wbi/index/top/feed/rcmd" {
+      var code = 0
+      var message = ""
+      if path == "/x/frontend/finger/spi" {
+        data = ["b_3": "local-device-fixture", "b_4": "local-device-fixture-4"]
+      } else if path == "/x/passport-tv-login/qrcode/auth_code" {
+        Self.qrRequests += 1
+        data = ["auth_code": "local-qr-fixture", "url": "https://passport.bilibili.com/fixture"]
+      } else if path == "/x/passport-tv-login/qrcode/poll" {
+        if ProcessInfo.processInfo.arguments.contains("--qa-login-network-loss") {
+          if !Self.loginPollFailed {
+            Self.loginPollFailed = true
+            client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost)); return
+          }
+          if Self.qrRequests > 1 {
+            code = 86038; message = "测试失败：返回前台不应替换原二维码"
+          } else { code = 86039 }
+        } else { code = 86039 } // Never persist a synthetic login to Keychain.
+      } else if path == "/x/web-interface/archive/relation" {
+        data = ["like": Self.liked, "coin": Self.coins, "favorite": Self.favorited]
+      } else if path == "/x/v2/view/coin/add" || path == "/x/v2/view/like/triple" {
+        if ProcessInfo.processInfo.arguments.contains("--qa-coin-timeout") {
+          client?.urlProtocol(self, didFailWithError: URLError(.timedOut)); return
+        }
+        if ProcessInfo.processInfo.arguments.contains("--qa-coin-error") {
+          code = -101; message = "请重新登录后再试"
+        } else {
+          if path.hasSuffix("triple") { Self.coins = 2; Self.liked = true; Self.favorited = true }
+          else { Self.coins = min(2, Self.coins + 1) }
+          data = ["like": Self.liked]
+        }
+      } else if path == "/x/web-interface/archive/like" {
+        Self.liked.toggle()
+      } else if path == "/x/web-interface/coin/add" || path == "/x/web-interface/archive/like/triple" {
+        code = -401; message = "测试要求使用客户端授权"
+      } else if populated && path == "/x/web-interface/wbi/index/top/feed/rcmd" {
         data = ["item": videos]
       } else if populated && (path == "/x/web-interface/popular" || path == "/x/v2/history/toview")
       {
@@ -200,7 +244,7 @@
             ? [] : [["mid": 11, "uname": "搜索用户 " + keyword, "usign": "本地用户搜索结果", "fans": 42]]
         ]
       } else if path == "/x/web-interface/nav" {
-        data = ["mid": 1, "uname": "本地测试", "isLogin": true]
+        data = ["mid": 1, "uname": "本地测试", "isLogin": true, "money": 10.0 - Double(Self.coins)]
       }
       let response = HTTPURLResponse(
         url: request.url!, statusCode: 200, httpVersion: nil,
@@ -208,7 +252,7 @@
       client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
       client?.urlProtocol(
         self,
-        didLoad: (try? JSONSerialization.data(withJSONObject: ["code": 0, "data": data])) ?? Data())
+        didLoad: (try? JSONSerialization.data(withJSONObject: ["code": code, "message": message, "data": data])) ?? Data())
       client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}

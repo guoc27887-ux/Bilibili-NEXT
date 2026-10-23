@@ -66,7 +66,7 @@ struct MobileOfficialWeb: UIViewRepresentable {
   }
   @MainActor final class Coordinator: NSObject, WKNavigationDelegate, WKHTTPCookieStoreObserver {
     let store: Store
-    let generation: UUID
+    var generation: UUID
     @Binding var error: String?
     @Binding var loading: Bool
     var task: Task<Void, Never>?
@@ -150,26 +150,34 @@ struct MobileOfficialWeb: UIViewRepresentable {
           let auth: Set<String> = [
             "SESSDATA", "bili_jct", "DedeUserID", "DedeUserID__ckMd5", "sid",
           ]
-          var changed = false
+          var webCookies: [String: String] = [:]
           for cookie in cookies
-          where cookie.domain == ".bilibili.com" || cookie.domain == "bilibili.com" {
-            if auth.contains(cookie.name)
-              || (API.interactionCookieNames.contains(cookie.name) && (cookie.expiresDate.map { $0 > Date() } ?? true))
-            {
-              changed =
-                changed
-                || (auth.contains(cookie.name)
-                  && self.store.api.cookies[cookie.name] != cookie.value)
+          where (cookie.domain == ".bilibili.com" || cookie.domain == "bilibili.com")
+            && (cookie.expiresDate.map { $0 > Date() } ?? true) {
+            if auth.contains(cookie.name) { webCookies[cookie.name] = cookie.value }
+            else if API.interactionCookieNames.contains(cookie.name) {
               self.store.api.cookies[cookie.name] = cookie.value
             }
           }
-          if changed {
-            do {
-              try Vault.save(
-                try JSONEncoder().encode(self.store.api.cookies.filter { auth.contains($0.key) }))
-              self.store.account = try await self.store.api.nav()
-            } catch { self.error = error.localizedDescription }
-          }
+          // Cookie observers can fire while WebKit is still importing the session.
+          guard webCookies["SESSDATA"] != nil, webCookies["bili_jct"] != nil,
+            webCookies["DedeUserID"] != nil,
+            webCookies != self.store.api.cookies.filter({ auth.contains($0.key) }) else { return }
+          do {
+            try self.store.api.saveWebLogin(webCookies)
+            self.generation = self.store.api.authenticationGeneration
+            let savedGeneration = self.generation
+            let mid = Int(webCookies["DedeUserID"]!)!
+            self.store.account = Account(name: "已登录", mid: mid, face: "")
+            self.store.actions.clear(); self.store.inbox.clear(); self.store.accountHistory.reset()
+            self.store.historySync.reset(); self.store.favoriteRevision += 1
+            if let profile = try? await self.store.api.nav(),
+              self.store.api.authenticationGeneration == savedGeneration {
+              self.store.account = profile
+            }
+            guard self.store.api.authenticationGeneration == savedGeneration else { return }
+            self.store.loginCompletion = UUID()
+          } catch { self.error = error.localizedDescription }
         }
       }
     }
@@ -224,43 +232,75 @@ struct MobileWebPage: View {
 struct MobileLogin: View {
   @Bindable var store: Store
   @State private var web = false
+  @Environment(\.scenePhase) private var loginPhase
+  @State private var saving = false
+  @State private var saveMessage: String?
   @Environment(\.dismiss) private var dismiss
   var body: some View {
     NavigationStack {
       ScrollView {
-        VStack(spacing: 22) {
-          Image(systemName: "person.crop.circle.badge.checkmark").font(.system(size: 48))
-            .foregroundStyle(biliPink)
-          Text("登录哔哩哔哩").font(.title2.bold())
-          Button("在本机打开官方登录") { web = true }.buttonStyle(.glassProminent)
-          Text("在官方页面完成登录与验证，登录信息保存在本机钥匙串。").font(.callout).foregroundStyle(.secondary)
-            .multilineTextAlignment(.center)
-          Divider()
-          Text("使用另一台设备扫码").font(.headline)
+        VStack(spacing: 14) {
+          Text("使用哔哩哔哩 App 扫码并确认。也可以保存二维码，在哔哩哔哩扫一扫中从相册选择。").font(.callout)
+            .foregroundStyle(.secondary).multilineTextAlignment(.center)
           ZStack {
             RoundedRectangle(cornerRadius: 20).fill(.white)
             if let image = store.qrImage {
               Image(decorative: image, scale: 1).interpolation(.none).resizable().scaledToFit()
                 .padding(16).opacity(store.loginExpired ? 0.15 : 1)
-            } else if !store.loginExpired {
-              ProgressView()
-            }
+            } else if !store.loginExpired { ProgressView() }
             if store.loginExpired { Button("刷新二维码") { store.refreshQR() }.buttonStyle(.glass) }
-          }.frame(width: 230, height: 230)
-          Text(store.loginStatus).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(
-            .center)
-        }.padding(28)
+          }.frame(width: 220, height: 220).accessibilityIdentifier("login-qr")
+          Text(store.loginStatus).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+            .accessibilityIdentifier("login-status")
+          Button(saving ? "正在保存…" : "保存二维码到相册") { Task { await saveQR() } }
+            .buttonStyle(.glassProminent).disabled(store.qrImage == nil || store.loginExpired || saving)
+          if let saveMessage { Text(saveMessage).font(.caption).foregroundStyle(.secondary) }
+          Text("登录信息仅保存在本机钥匙串。取消后保留原登录。").font(.caption).foregroundStyle(.secondary)
+          DisclosureGroup("其他登录方式") {
+            VStack(spacing: 12) {
+              Button("使用网页登录") { store.closeLogin(); web = true }.buttonStyle(.glass)
+              Text("网页登录使用网页投币通道；如遇非法访问，请使用上方扫码登录获取客户端授权。")
+                .font(.caption).foregroundStyle(.secondary)
+            }.padding(.top, 12)
+          }
+        }.padding(24)
       }.navigationTitle("登录").navigationBarTitleDisplayMode(.inline).toolbar {
         Button("关闭") { dismiss() }
       }
-      .sheet(isPresented: $web, onDismiss: { if store.account != nil { store.showLogin = false } })
-      {
-        MobileWebPage(
-          store: store,
-          target: WebTarget(url: URL(string: "https://passport.bilibili.com/login")!, title: "官方登录")
-        )
+      .sheet(isPresented: $web, onDismiss: {
+        if !store.loginExpired && store.qrImage == nil { store.refreshQR() }
+      }) {
+        MobileWebPage(store: store,
+          target: WebTarget(url: URL(string: "https://passport.bilibili.com/login")!, title: "官方登录"))
+      }
+      .onChange(of: store.loginCompletion) { dismiss() }
+      .onChange(of: loginPhase) { _, phase in
+        guard !web else { return }
+        if phase == .active { store.resumeLogin() } else { store.pauseLogin() }
       }
     }
+  }
+  private func saveQR() async {
+    guard let image = store.qrImage, !store.loginExpired, !saving else { return }
+    saving = true; saveMessage = nil
+    defer { saving = false }
+    let status = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
+    guard status == .authorized || status == .limited else {
+      saveMessage = "未获得相册添加权限。可以截图保存，或在系统设置中允许添加照片。"
+      return
+    }
+    // Include the QR quiet zone in the saved image, just as in the on-screen card.
+    let qr = UIImage(cgImage: image)
+    let renderer = UIGraphicsImageRenderer(size: CGSize(width: qr.size.width + 64, height: qr.size.height + 64))
+    let framed = renderer.image { context in
+      UIColor.white.setFill(); context.fill(CGRect(origin: .zero, size: CGSize(width: qr.size.width + 64, height: qr.size.height + 64)))
+      context.cgContext.interpolationQuality = .none
+      qr.draw(at: CGPoint(x: 32, y: 32))
+    }
+    do {
+      try await PHPhotoLibrary.shared().performChanges { PHAssetChangeRequest.creationRequestForAsset(from: framed) }
+      saveMessage = "已保存。请在二维码过期前，用哔哩哔哩扫一扫选择这张图片。"
+    } catch { saveMessage = error.localizedDescription }
   }
 }
 struct MobileAccount: View {
@@ -311,7 +351,12 @@ struct MobileAccount: View {
         Link("直播", destination: URL(string: "https://live.bilibili.com/")!)
         Link("创作中心", destination: URL(string: "https://member.bilibili.com/platform/home")!)
       }
-      if store.account != nil { Section { Button("退出登录", role: .destructive) { store.logout() } } }
+      if store.account != nil {
+        Section {
+          Button("重新登录") { store.login() }
+          Button("退出登录", role: .destructive) { store.logout() }
+        }
+      }
     }.navigationTitle("我的")
   }
 }
@@ -640,9 +685,10 @@ struct MobileSettings: View {
         if let cacheNotice { Text(cacheNotice).foregroundStyle(.secondary) }
       }
       Section("关于") {
-        LabeledContent("版本", value: "0.1.0 · iOS 开发预览")
-        Text("为 iPhone 打造的哔哩哔哩第三方客户端。当前为开发预览版本。").font(.footnote)
+        LabeledContent("版本", value: "\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.1.0") · iOS 开发预览")
+        Text("面向个人学习与研究，与哔哩哔哩官方无任何关联，未获得官方授权或背书。当前为开发预览版本，源码保留 MIT 授权范围。").font(.footnote)
           .foregroundStyle(.secondary)
+        Link("项目主页与版本下载", destination: URL(string: "https://github.com/wzk112/Bilibili-NEXT")!)
         NavigationLink("开源许可") {
           ScrollView {
             Text(licenses).font(.caption.monospaced()).textSelection(.enabled).padding()

@@ -105,7 +105,7 @@ struct CommentText: View {
         let loaded = await withTaskGroup(of: (URL, CGImage?).self) { group in
           var iterator = requested.emotes.makeIterator()
           func enqueue(_ emote: CommentEmote) {
-            group.addTask { (emote.url, try? await ThumbnailCache.shared.thumbnail(emote.url)) }
+            group.addTask { (emote.url, try? await ThumbnailCache.shared.thumbnail(emote.url, maxPixelSize: 128)) }
           }
           for _ in 0..<4 { if let emote = iterator.next() { enqueue(emote) } }
           var result: [URL: CGImage] = [:]
