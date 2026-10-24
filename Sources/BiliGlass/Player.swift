@@ -20,6 +20,7 @@ struct PlaybackResume {
   private var videoTransport: ParallelVideoStream?
   private var diskCache: PlaybackDiskCache?
   private var cdnTransport: CDNTransport?
+  private var mediaConnectionPool: HTTPRangeStreamingClient?
   var detail: Detail?
   var streams: Streams?
   var selectedCID = 0
@@ -225,6 +226,7 @@ struct PlaybackResume {
     let s = try await api.streams(bvid: bvid, cid: cid)
     try Task.checkCancellation()
     guard token == generation else { return }
+    routeDiagnostics = s.diagnostics
     startupMilliseconds["playurl"] = elapsed()
     let preferred = UserDefaults.standard.integer(forKey: "quality")
     let qn =
@@ -235,7 +237,11 @@ struct PlaybackResume {
     }
     streams = s
     let connections = connectionOverride ?? (UserDefaults.standard.object(forKey: "videoThreads") as? Int ?? 4)
-    let cdn = CDNTransport()
+    // Keep established HTTPS connections across quality changes, but create fresh
+    // route/prefix state from the newly fetched signed URLs on every load.
+    let pool = mediaConnectionPool ?? HTTPRangeStreamingClient(maximumConnectionsPerHost: 32)
+    mediaConnectionPool = pool
+    let cdn = CDNTransport(source: pool)
     cdnTransport = cdn
     let videoURLs = Set(s.videos.flatMap(\.urlCandidates))
     let cache = (UserDefaults.standard.object(forKey: "continuousPreload") as? Bool ?? true)
@@ -244,7 +250,7 @@ struct PlaybackResume {
           streamDuringStartup: true) : nil
     diskCache = cache
     let transport = ParallelVideoStream(
-      connections: connections, videoURLs: videoURLs, source: cache ?? cdn as any HTTPRangeStreaming)
+      connections: connections, videoURLs: videoURLs, source: cache ?? cdn as any HTTPRangeStreaming, startup: true)
     videoTransport = transport
     bridge = DASHToHLSBridge(mediaStreamer: transport)
     let others = API.videoCandidates(s.videos, quality: qn).filter { $0.codecs != original.codecs }
@@ -271,14 +277,14 @@ struct PlaybackResume {
         let (videoRoute, audioRoute) = try await (selectedVideo, selectedAudio)
         try Task.checkCancellation()
         guard token == generation else { return }
-        routeDiagnostics = [
+        routeDiagnostics = fresh.diagnostics.merging([
           "videoHost": videoRoute.host, "audioHost": audioRoute.host,
           "videoProbeMS": String(videoRoute.milliseconds), "audioProbeMS": String(audioRoute.milliseconds),
           "videoCandidates": String(videoRoute.candidateCount), "audioCandidates": String(audioRoute.candidateCount),
           "attempt": String(index + 1), "codec": source.codecs,
           "videoBitrate": String(source.bandwidth ?? 0), "audioBitrate": String(fresh.audio.bandwidth ?? 0),
           "audioCodec": fresh.audio.codecs, "frameRate": String(source.videoAttributes?.frameRate ?? 0),
-        ]
+        ]) { _, current in current }
         startupMilliseconds["selected"] = elapsed()
         loadingMessage = "正在准备播放"
         let activeBridge = bridge
@@ -310,6 +316,7 @@ struct PlaybackResume {
         try Task.checkCancellation()
         guard token == generation, player.currentItem === item else { throw CancellationError() }
         startupMilliseconds["playing"] = elapsed()
+        await transport.finishStartup()
         await cache?.start()
         try Task.checkCancellation()
         guard token == generation, player.currentItem === item else { throw CancellationError() }
@@ -562,11 +569,25 @@ struct PlaybackResume {
   func transferStats() async -> [String: Int] {
     guard let videoTransport else { return [:] }
     // Disk-cache permits measure network work; outer permits include cached reads.
-    let stats = if let diskCache { await diskCache.statistics() }
+    let stats = if loading { await videoTransport.statistics() }
+      else if let diskCache { await diskCache.statistics() }
       else { await videoTransport.statistics() }
     return stats
   }
   func cdnAttempts() async -> [[String: String]] { await cdnTransport?.diagnostics() ?? [] }
+  func diagnosticReport() async -> String {
+    let report: [String: Any] = [
+      "appVersion": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development",
+      "build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "",
+      "system": ProcessInfo.processInfo.operatingSystemVersionString,
+      "bvid": detail?.video.bvid ?? requestedBVID ?? "", "cid": selectedCID,
+      "quality": selectedQuality, "failureCode": failureCode, "stage": loadingMessage,
+      "sources": routeDiagnostics, "probes": await cdnAttempts(),
+      "startupMS": startupMilliseconds,
+    ]
+    guard let data = try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]) else { return "" }
+    return String(decoding: data, as: UTF8.self)
+  }
   func networkStats() async -> [String: Int] {
     guard let transport = cdnTransport else { return [:] }
     let stats = await transport.statistics()
@@ -604,6 +625,14 @@ struct PlaybackResume {
   private func fail(_ e: Error, token: UUID) {
     guard token == generation, !(e is CancellationError) else { return }
     loading = false
+    if let manifest = e as? StreamManifestError {
+      routeDiagnostics = manifest.diagnostics
+      failureCode = "MEDIA_MANIFEST_" + manifest.kind.uppercased()
+    } else if let urlError = e as? URLError {
+      failureCode = "NSURLErrorDomain \(urlError.code.rawValue)"
+    } else if let code = (e as? BiliError)?.code {
+      failureCode = "API \(code)"
+    }
     error = e.localizedDescription
   }
   func saveCurrentProgress() {
@@ -653,6 +682,7 @@ struct PlaybackResume {
     personAvoidance.stop()
     #endif
     beginChange()
+    mediaConnectionPool = nil
     loading = false
   }
   isolated deinit {

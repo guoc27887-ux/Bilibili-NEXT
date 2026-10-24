@@ -53,6 +53,7 @@ struct WebTarget: Identifiable {
   let playerNavigation = MobilePlayerNavigation()
   let actions = VideoActionsModel()
   let inbox = InboxModel()
+  let messageUnread = MessageUnreadModel()
   let accountHistory = AccountHistory()
   let historySync = WatchHistorySync()
   let danmaku = MobileDanmaku()
@@ -103,6 +104,9 @@ struct WebTarget: Identifiable {
     ])
     if let data = UserDefaults.standard.data(forKey: "history") {
       history = (try? JSONDecoder().decode([HistoryEntry].self, from: data)) ?? []
+    }
+    inbox.onRead = { [weak self] in
+      guard let self else { return }; await self.messageUnread.refresh(api: self.api)
     }
     playback.onProgress = { [weak self] bvid, cid, seconds, final in
       self?.save(bvid, cid: cid, seconds: seconds, final: final)
@@ -176,7 +180,7 @@ struct WebTarget: Identifiable {
     account = try? await api.nav()
     restoring = false
     let args = ProcessInfo.processInfo.arguments
-    var qa = args.contains("--qa-capture")
+    var qa = args.contains("--qa-capture") && !args.contains("--qa-video")
     #if DEBUG
       if let i = args.firstIndex(of: "--qa-connections"), args.indices.contains(i + 1), let count = Int(args[i + 1]) { playback.connectionOverride = max(1, min(32, count)) }
       if let i = args.firstIndex(of: "--qa-fixture"), args.indices.contains(i + 1),
@@ -208,6 +212,9 @@ struct WebTarget: Identifiable {
     if !qa, let i = args.firstIndex(of: "--qa-video"), args.indices.contains(i + 1),
       let bvid = videoID(args[i + 1])
     {
+      #if DEBUG
+        if args.contains("--qa-quality-cycle") { playback.persistQualityPreference = false }
+      #endif
       if args.contains("--qa-from-start") {
         let visit = MobileVideoVisit(bvid: bvid)
         visit.resume = PlaybackResume(position: 0, playing: true)
@@ -222,6 +229,31 @@ struct WebTarget: Identifiable {
           guard let self, !Task.isCancelled else { return }
           await self.writeQA()
           #if DEBUG
+            // Explicit device regression mode; avoids an additional test-runner
+            // app on devices already at the free-signing installation limit.
+            if args.contains("--qa-quality-cycle") {
+              if sample == 6, args.contains("--qa-4k"), self.playback.durationSeconds > 60, !self.playback.loading {
+                await self.playback.player.seek(to: CMTime(seconds: self.playback.durationSeconds * 0.55,
+                  preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero)
+              } else if sample == 12 {
+                await self.writeQA(suffix: "-initial")
+                self.playback.selectQuality(args.contains("--qa-4k") ? 120 : 64, api: self.api)
+              } else if sample == 28 {
+                await self.writeQA(suffix: args.contains("--qa-4k") ? "-4k-first" : "-720p")
+                self.playback.player.pause()
+                self.playback.selectQuality(80, api: self.api)
+              } else if sample == 44 {
+                await self.writeQA(suffix: "-1080p-paused")
+                MobileUIFixture.captureInterface()
+                if args.contains("--qa-4k") {
+                  self.playback.togglePlayback()
+                  self.playback.selectQuality(120, api: self.api)
+                }
+              } else if sample == 65, args.contains("--qa-4k") {
+                await self.writeQA(suffix: "-4k-final")
+                MobileUIFixture.captureInterface()
+              }
+            }
             if args.contains("--qa-capture") && sample == 20 { MobileUIFixture.captureInterface() }
           #endif
         }
@@ -294,7 +326,11 @@ struct WebTarget: Identifiable {
         URL(fileURLWithPath: local.path), video: local.video, cid: local.cid,
         sidecar: local.danmakuPath.map { URL(fileURLWithPath: $0) }, restoring: visit.resume)
     } else {
-      playback.open(visit.bvid, api: api, initialCID: visit.cid, restoring: visit.resume) {
+      var diagnosticQuality: Int?
+      #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("--qa-4k") { diagnosticQuality = 80 }
+      #endif
+      playback.open(visit.bvid, api: api, quality: diagnosticQuality, initialCID: visit.cid, restoring: visit.resume) {
         [weak self] cid in
         self?.position(visit.bvid, cid: cid) ?? 0
       }
@@ -439,7 +475,7 @@ struct WebTarget: Identifiable {
           let mid = login.appCoinAuthorization!.accountID
           account = Account(name: account?.mid == mid ? account!.name : "已登录", mid: mid,
             face: account?.mid == mid ? account!.face : "")
-          actions.clear(); inbox.clear(); accountHistory.reset(); historySync.reset()
+          actions.clear(); inbox.clear(); messageUnread.reset(); accountHistory.reset(); historySync.reset()
           favoriteRevision += 1
           loginStatus = "已登录"
           qrImage = nil; loginCode = nil
@@ -483,14 +519,14 @@ struct WebTarget: Identifiable {
     api.logout()
     account = nil
     actions.clear()
-    inbox.clear()
+    inbox.clear(); messageUnread.reset()
     accountHistory.reset()
     historySync.reset()
   }
   func verify(_ title: String = "官方验证") {
     webTarget = WebTarget(url: URL(string: "https://www.bilibili.com/")!, title: title)
   }
-  private func writeQA() async {
+  private func writeQA(suffix: String = "") async {
     var state: [String: Any] = [
       "date": Date().ISO8601Format(), "loading": playback.loading,
       "renderedFrame": playback.renderedFrame,
@@ -504,6 +540,7 @@ struct WebTarget: Identifiable {
       "unsupportedScripts": unsupportedScripts,
     ]
     state["signedIn"] = api.signedIn
+    state["unread"] = ["reply": messageUnread.counts.replies, "at": messageUnread.counts.mentions, "like": messageUnread.counts.likes, "private": messageUnread.counts.privateMessages, "error": messageUnread.error ?? ""]
     state["clientAuthorizationPresent"] = api.appCoinAuthorization != nil
     state["clientAuthorizationValid"] = api.appCoinAuthorization?.isValid(for: api.cookies["DedeUserID"]) == true
     state["network"] = await playback.networkStats()
@@ -511,6 +548,9 @@ struct WebTarget: Identifiable {
     state["danmakuPerformance"] = danmakuPerformance
     state["orientation"] = orientationDiagnostics
     state["startupMS"] = playback.startupMilliseconds
+    state["sources"] = playback.routeDiagnostics
+    state["failureCode"] = playback.failureCode
+    state["cdnProbes"] = await playback.cdnAttempts()
     if qaTransferSamples.count < 12 {
       qaTransferSamples.append(["date": state["date"]!, "position": playback.positionSeconds, "transfers": state["transfers"]!, "network": state["network"]!])
     }
@@ -524,7 +564,7 @@ struct WebTarget: Identifiable {
     if let data = try? JSONSerialization.data(
       withJSONObject: state, options: [.prettyPrinted, .sortedKeys])
     {
-      try? data.write(to: folder.appendingPathComponent("playback.json"), options: .atomic)
+      try? data.write(to: folder.appendingPathComponent("playback\(suffix).json"), options: .atomic)
     }
   }
   func writeGestureQA(_ phase: String) {
@@ -577,6 +617,11 @@ enum AppPaths {
     WindowGroup {
       MobileRoot(store: store).tint(biliPink)
         .task { await store.start() }
+        .task(id: "\(phase):\(store.api.authenticationGeneration):\(store.account?.mid ?? 0)") {
+          guard store.account != nil else { store.messageUnread.reset(); return }
+          guard phase == .active else { return }
+          await store.messageUnread.poll(api: store.api)
+        }
         .onOpenURL { url in
           if let bvid = videoID(url.absoluteString) {
             store.open(bvid)

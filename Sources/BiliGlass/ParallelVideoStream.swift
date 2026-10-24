@@ -12,15 +12,16 @@ final class ParallelVideoStream: HTTPRangeStreaming, Sendable {
 
   init(
     connections: Int, videoURLs: Set<URL> = [],
-    source: any HTTPRangeStreaming = HTTPRangeStreamingClient()
+    source: any HTTPRangeStreaming = HTTPRangeStreamingClient(), startup: Bool = false
   ) {
     self.videoURLs = videoURLs
     self.connections = max(1, min(32, connections))
     self.source = source
-    permits = VideoStreamPermits(limit: max(1, min(32, connections)))
+    permits = VideoStreamPermits(limit: self.connections, startup: startup)
   }
 
   func statistics() async -> [String: Int] { await permits.statistics() }
+  func finishStartup() async { await permits.finishStartup() }
 
   func stream(
     from url: URL, rangeHeader: String, expectedRange: HTTPByteRange,
@@ -32,7 +33,12 @@ final class ParallelVideoStream: HTTPRangeStreaming, Sendable {
     let isVideo =
       videoURLs.contains(url)
       || allowedContentTypes?.contains(where: { $0.lowercased().hasPrefix("video/") }) == true
-    let blockSize = Self.blockSize(length: expectedRange.length, connections: connections)
+    // A 4K segment split across 24–32 cold requests can spend seconds opening
+    // connections and waiting for its slowest piece. Start with at most four
+    // lanes, then grow after playback has usable media. Use the same lane count
+    // for partitioning and admission so queued tiny pieces cannot delay the head.
+    let lanes = await permits.currentLimit
+    let blockSize = Self.blockSize(length: expectedRange.length, connections: lanes)
     guard connections > 1, isVideo, expectedRange.length > UInt64(blockSize) else {
       return try await source.stream(
         from: url, rangeHeader: rangeHeader, expectedRange: expectedRange,
@@ -111,7 +117,7 @@ final class ParallelVideoStream: HTTPRangeStreaming, Sendable {
         }
       }
       defer { group.cancelAll() }
-      for _ in 0..<connections { try schedule() }
+      for _ in 0..<lanes { try schedule() }
       var pending: [Int: VideoStreamBlock] = [:]
       var emitting = 0
       var emitted: UInt64 = 0
@@ -207,15 +213,24 @@ actor VideoStreamPermits {
   private var limit: Int
   private let maximum: Int
   private let recoveryInterval: Duration
+  private var starting: Bool
+  var currentLimit: Int { limit }
   private var successfulBlocks = 0
   private var lastFailure: ContinuousClock.Instant?
   private var retries = 0
   private var lastReduction: ContinuousClock.Instant?
   private var lastRecovery: ContinuousClock.Instant?
   private var waiters: [(UUID, CheckedContinuation<Void, Error>, Bool)] = []
-  init(limit: Int, recoveryInterval: Duration = .seconds(2)) {
-    maximum = max(1, min(32, limit)); self.limit = maximum
+  init(limit: Int, recoveryInterval: Duration = .seconds(2), startup: Bool = false) {
+    maximum = max(1, min(32, limit)); self.limit = startup ? min(4, maximum) : maximum
     self.recoveryInterval = recoveryInterval
+    starting = startup
+  }
+  func finishStartup() {
+    guard starting else { return }
+    starting = false
+    successfulBlocks = 0
+    lastRecovery = .now
   }
   func acquire(foreground: Bool = true) async throws {
     try Task.checkCancellation()
@@ -257,10 +272,11 @@ actor VideoStreamPermits {
   func release(succeeded: Bool = false) {
     if succeeded {
       successfulBlocks += 1
-      if limit < maximum, successfulBlocks >= limit,
+      let ceiling = starting ? min(4, maximum) : maximum
+      if limit < ceiling, successfulBlocks >= limit,
         (lastFailure == nil || lastFailure!.duration(to: .now) >= recoveryInterval),
         (lastRecovery == nil || lastRecovery!.duration(to: .now) >= recoveryInterval) {
-        limit = min(maximum, limit * 2); successfulBlocks = 0; lastRecovery = .now
+        limit = min(ceiling, limit * 2); successfulBlocks = 0; lastRecovery = .now
       }
     }
     active -= 1

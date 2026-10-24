@@ -27,6 +27,7 @@ struct PreferencesView: View {
   @AppStorage("rememberPosition") private var rememberPosition = true
   @AppStorage("syncWatchHistory") private var syncWatchHistory = true
   @AppStorage("autoPlay") private var autoPlay = true
+  @AppStorage("videoCodecPreference") private var codec = "auto"
   @AppStorage("commentSort") private var commentSort = 1
   @State private var backgroundError: String?
   @State private var importing = false
@@ -97,6 +98,13 @@ struct PreferencesView: View {
   private var playbackSettings: some View {
     VStack(spacing: 18) {
       section("播放") {
+        Picker("首选编码", selection: $codec) {
+          ForEach(VideoCodecPreference.allCases) { Text($0.title).tag($0.rawValue) }
+        }
+        Text("同一画质优先使用所选编码；没有对应流或播放失败时自动回退。下次打开视频或切换画质生效。")
+          .font(.caption).foregroundStyle(.secondary)
+        Text(VideoCodecPreference.hardwareDecodeSummary + "具体解码方式由系统播放器选择。")
+          .font(.caption).foregroundStyle(.secondary)
         toggleRow("打开视频后自动播放", value: $autoPlay)
         toggleRow("记住观看位置", value: $rememberPosition)
         toggleRow("同步观看进度到账号", value: $syncWatchHistory)
@@ -115,7 +123,7 @@ struct PreferencesView: View {
         Text("起播时自动试读视频和音频线路，持续缓冲时重新选择。按当前网络响应选取。")
           .font(.caption).foregroundStyle(.secondary)
         stepperRow("视频加载并发", value:$videoThreads, range:1...32)
-        Text("按需并行读取视频分块，按顺序交给播放器；切换视频或清晰度后生效。").font(.caption).foregroundStyle(.secondary)
+        Text("此值为并发上限。起播及切换画质先使用最多 4 路，出画后按传输情况逐步增加；切换视频或清晰度后生效。").font(.caption).foregroundStyle(.secondary)
       }
       section("下载") {
         stepperRow("每个下载的连接数", value:$downloadThreads, range:1...32)

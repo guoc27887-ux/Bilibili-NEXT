@@ -239,80 +239,19 @@ struct MobilePlayerContent: View {
   @AppStorage("danmakuEnabled") private var dmEnabled = true
   @AppStorage("autoPlayNext") private var autoNext = false
   @AppStorage("loopVideo") private var loop = false
-  @Environment(\.dismiss) private var dismiss
   private var active: Bool {
     store.playerNavigation.active == visit.id || store.playerNavigation.root == nil
   }
   private var displayedDetail: Detail? { active ? store.playback.detail : visit.detail }
-  @Environment(\.dynamicTypeSize) private var textSize
   var body: some View {
     Group {
-      ScrollView {
-        VStack(alignment: .leading, spacing: 18) {
-          Group {
-            if active { MobileVideoPlayer(store: store) } else { Color.black }
-          }.aspectRatio(16 / 9, contentMode: .fit).background(.black)
-            .clipShape(.rect(cornerRadius: 16))
-          if store.playback.buffering && !store.playback.loading {
-            Label("正在缓冲…", systemImage: "arrow.trianglehead.2.clockwise")
-              .font(.caption).foregroundStyle(.secondary)
-          }
-          if let error = store.playback.error {
-            MobileError(text: error) { store.playback.retry(api: store.api) }
-          }
-          playbackOptions
-          if let error = store.extras.subtitleError {
-            Text("字幕：" + error).font(.caption).foregroundStyle(.secondary)
-          }
-          if let error = store.danmaku.error ?? store.danmaku.specialError {
-            Text("弹幕：" + error).font(.caption).foregroundStyle(.secondary)
-          }
-          if let detail = displayedDetail {
-            Text(detail.video.title).font(.title3.bold()).textSelection(.enabled)
-              .accessibilityIdentifier("player-title")
-            ViewThatFits(in: .horizontal) {
-              HStack {
-                MobileProfileLink(store: store, mid: detail.ownerID) {
-                  Label(detail.video.author, systemImage: "person.crop.circle")
-                    .accessibilityIdentifier("player-author")
-                }
-                Spacer()
-                Text(detail.video.bvid).font(.caption).foregroundStyle(.secondary)
-              }
-              VStack(alignment: .leading, spacing: 8) {
-                MobileProfileLink(store: store, mid: detail.ownerID) {
-                  Label(detail.video.author, systemImage: "person.crop.circle")
-                    .accessibilityIdentifier("player-author")
-                }
-                Text(detail.video.bvid).font(.caption).foregroundStyle(.secondary)
-              }
-            }
-            if let date = detail.video.publishedAt {
-              Text(date.formatted(AppDateFormat.timestamp)).font(.caption).foregroundStyle(
-                .secondary)
-            }
-            if detail.aid > 0 {
-              actionBar(detail)
-              danmakuInput(detail)
-            }
-            Picker("内容", selection: $visit.section) {
-              Text("简介").tag(0)
-              Text(commentTitle(detail)).tag(1)
-            }.pickerStyle(.segmented)
-            if visit.section == 1 && detail.aid > 0 {
-              MobileComments(store: store, aid: detail.aid, model: visit.comments)
-            } else {
-              description(detail)
-            }
-          }
-        }.padding(16)
-      }.scrollDismissesKeyboard(.interactively).scrollPosition($visit.scroll)
+      playerLayout
         .navigationTitle("正在播放").navigationBarTitleDisplayMode(.inline)
         .toolbar {
           if store.playerNavigation.root?.id == visit.id || store.playerNavigation.root == nil {
             ToolbarItem(placement: .topBarLeading) {
               Button {
-                dismiss()
+                store.showPlayer = false
               } label: {
                 Image(systemName: "chevron.down")
               }.accessibilityLabel("收起播放器")
@@ -407,6 +346,90 @@ struct MobilePlayerContent: View {
           }
         }
     }
+  }
+  @ViewBuilder private var playerLayout: some View {
+    if UIDevice.current.userInterfaceIdiom == .pad {
+      GeometryReader { geometry in
+        ScrollView {
+          VStack(alignment: .leading, spacing: 20) {
+            video.frame(height: min(min(1280, max(0, geometry.size.width - 40)) * 9 / 16,
+              max(180, geometry.size.height - 170)))
+            information
+          }.frame(maxWidth: 1280).padding(20).frame(maxWidth: .infinity)
+        }.scrollDismissesKeyboard(.interactively).scrollPosition($visit.scroll)
+          .accessibilityIdentifier("player-information")
+      }
+    } else {
+      ScrollView {
+        VStack(alignment: .leading, spacing: 18) {
+          video.aspectRatio(16 / 9, contentMode: .fit)
+          information
+        }.padding(16)
+      }.scrollDismissesKeyboard(.interactively).scrollPosition($visit.scroll)
+    }
+  }
+  private var video: some View {
+    Group {
+      if active { MobileVideoPlayer(store: store) } else { Color.black }
+    }.background(.black).clipShape(.rect(cornerRadius: 16))
+      .accessibilityElement(children: .contain)
+      .accessibilityIdentifier("player-viewport")
+  }
+  private var information: some View {
+    VStack(alignment: .leading, spacing: 18) {
+      if store.playback.buffering && !store.playback.loading {
+        Label("正在缓冲…", systemImage: "arrow.trianglehead.2.clockwise")
+          .font(.caption).foregroundStyle(.secondary)
+      }
+      if let error = store.playback.error {
+        MobileError(text: error) { store.playback.retry(api: store.api) }
+      }
+      playbackOptions
+      if let error = store.extras.subtitleError {
+        Text("字幕：" + error).font(.caption).foregroundStyle(.secondary)
+      }
+      if let error = store.danmaku.error ?? store.danmaku.specialError {
+        Text("弹幕：" + error).font(.caption).foregroundStyle(.secondary)
+      }
+      if let detail = displayedDetail {
+        Text(detail.video.title).font(.title3.bold()).textSelection(.enabled)
+          .accessibilityIdentifier("player-title")
+        ViewThatFits(in: .horizontal) {
+          HStack {
+            MobileProfileLink(store: store, mid: detail.ownerID) {
+              Label(detail.video.author, systemImage: "person.crop.circle")
+                .accessibilityIdentifier("player-author")
+            }
+            Spacer()
+            Text(detail.video.bvid).font(.caption).foregroundStyle(.secondary)
+          }
+          VStack(alignment: .leading, spacing: 8) {
+            MobileProfileLink(store: store, mid: detail.ownerID) {
+              Label(detail.video.author, systemImage: "person.crop.circle")
+                .accessibilityIdentifier("player-author")
+            }
+            Text(detail.video.bvid).font(.caption).foregroundStyle(.secondary)
+          }
+        }
+        if let date = detail.video.publishedAt {
+          Text(date.formatted(AppDateFormat.timestamp)).font(.caption).foregroundStyle(
+            .secondary)
+        }
+        if detail.aid > 0 {
+          actionBar(detail)
+          danmakuInput(detail)
+        }
+        Picker("内容", selection: $visit.section) {
+          Text("简介").tag(0)
+          Text(commentTitle(detail)).tag(1)
+        }.pickerStyle(.segmented)
+        if visit.section == 1 && detail.aid > 0 {
+          MobileComments(store: store, aid: detail.aid, model: visit.comments)
+        } else {
+          description(detail)
+        }
+      }
+    }.frame(maxWidth: .infinity, alignment: .leading)
   }
   private func commentTitle(_ detail: Detail) -> String {
     let count = visit.comments.hasLoadedCount ? visit.comments.count : detail.counts.replies
@@ -583,6 +606,7 @@ struct MobilePlaybackDetails: View {
   @State private var stats: [String: Int] = [:]
   @State private var network: [String: Int] = [:]
   @State private var attempts: [[String: String]] = []
+  @State private var copied = false
   @Environment(\.dismiss) private var dismiss
   var body: some View {
     NavigationStack {
@@ -607,8 +631,20 @@ struct MobilePlaybackDetails: View {
         if store.unsupportedScripts > 0 {
           LabeledContent("暂不支持的脚本", value: String(store.unsupportedScripts))
         }
-        ForEach(store.playback.routeDiagnostics.keys.sorted(), id: \.self) { key in
+        ForEach(store.playback.routeDiagnostics.keys.filter { !$0.hasPrefix("manifest.") }.sorted(), id: \.self) { key in
           LabeledContent(key, value: store.playback.routeDiagnostics[key] ?? "")
+        }
+        Section("播放诊断") {
+          if !store.playback.failureCode.isEmpty { LabeledContent("错误代码", value: store.playback.failureCode) }
+          if let available = store.playback.routeDiagnostics["manifest.video.available"] {
+            LabeledContent("可用视频流", value: available)
+            LabeledContent("可用音频流", value: store.playback.routeDiagnostics["manifest.audio.available"] ?? "—")
+          }
+          Button(copied ? "已复制诊断信息" : "复制播放诊断") {
+            Task { UIPasteboard.general.string = await store.playback.diagnosticReport(); copied = true }
+          }
+          Text("包含版本、播放阶段和线路错误；不包含登录凭据或完整媒体地址。")
+            .font(.caption).foregroundStyle(.secondary)
         }
         ForEach(stats.keys.sorted(), id: \.self) { key in
           LabeledContent(key, value: String(stats[key] ?? 0))

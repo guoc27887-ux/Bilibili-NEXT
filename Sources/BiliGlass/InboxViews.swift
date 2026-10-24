@@ -12,13 +12,16 @@ struct NativeInboxPage: View {
         Text("消息").font(.title2.bold())
         Spacer()
         Picker("消息分类", selection: $tab) {
-          Text("私信").tag(0)
-          Text("回复我的").tag(1)
-          Text("@ 我的").tag(2)
-          Text("收到的赞").tag(3)
+          Text(categoryTitle("私信", kind: 0)).tag(0)
+          Text(categoryTitle("回复我的", kind: 1)).tag(1)
+          Text(categoryTitle("@ 我的", kind: 2)).tag(2)
+          Text(categoryTitle("收到的赞", kind: 3)).tag(3)
           Text("系统通知").tag(4)
-        }.labelsHidden().pickerStyle(.segmented).frame(maxWidth: 500)
+        }.labelsHidden().pickerStyle(.segmented).frame(maxWidth: 600)
       }.padding(18).floatingGlass(22)
+      if let error = store.messageUnread.error {
+        HStack { Text(error).font(.caption).foregroundStyle(.secondary); Button("重试") { Task { await store.messageUnread.refresh(api: store.api) } } }
+      }
       if store.account == nil {
         ContentUnavailableView {
           Label("登录后查看消息", systemImage: "envelope")
@@ -36,7 +39,12 @@ struct NativeInboxPage: View {
     }.task(id: String(store.account?.mid ?? 0) + ":" + String(tab == 4)) {
       guard store.account != nil else { return }
       await inbox.load(api: store.api, systemOnly: tab == 4)
+      await store.messageUnread.refresh(api: store.api)
     }
+  }
+  private func categoryTitle(_ title: String, kind: Int) -> String {
+    let count = store.messageUnread.counts[kind]
+    return count > 0 ? title + " (\(count > 99 ? "99+" : String(count)))" : title
   }
   private var conversationList: some View {
     let inbox = store.inbox
@@ -228,6 +236,7 @@ struct NativeNotificationsPage: View {
   @State private var loading = false
   @State private var error: String?
   @State private var identity = UUID()
+  @State private var focusedNotice: NativeNotice?
   var body: some View {
     ScrollView {
       LazyVStack(alignment: .leading, spacing: 18) {
@@ -242,8 +251,8 @@ struct NativeNotificationsPage: View {
                   Circle())
             }.buttonStyle(.plain)
             VStack(alignment: .leading, spacing: 10) {
-              Text(notice.name).font(.headline)
-              Text(notice.text).textSelection(.enabled)
+              Text(notice.headline).font(.headline)
+              if !notice.text.isEmpty { Text(notice.text).textSelection(.enabled) }
               if !notice.quote.isEmpty {
                 Text(notice.quote).font(.callout).foregroundStyle(.secondary).lineLimit(4)
               }
@@ -251,7 +260,9 @@ struct NativeNotificationsPage: View {
                 Text(notice.date.formatted(AppDateFormat.timestamp)).font(.caption)
                   .foregroundStyle(.secondary)
                 Spacer()
-                if let url = notice.url {
+                if notice.commentTarget != nil {
+                  Button("查看并回复") { focusedNotice = notice }.buttonStyle(.glass)
+                } else if let url = notice.originalPageURL {
                   Button("查看原内容") {
                     if let bvid = videoID(url.absoluteString) {
                       store.open(bvid)
@@ -273,7 +284,11 @@ struct NativeNotificationsPage: View {
           ContentUnavailableView("暂无消息", systemImage: "bell").frame(maxWidth: .infinity)
         }
       }.padding(AppLayout.pageInset)
-    }.task(id: kind) { await load(reset: true) }
+    }.task(id: "\(kind):\(store.account?.mid ?? 0)") { await load(reset: true) }
+      .refreshable { await load(reset: true) }
+      .sheet(item: $focusedNotice) { notice in
+        NativeNoticeComment(store: store, notice: notice)
+      }
   }
   private func load(reset: Bool) async {
     if reset {
@@ -303,11 +318,77 @@ struct NativeNotificationsPage: View {
         (reset ? latest["items"] as? [[String: Any]] ?? [] : [])
         + (total["items"] as? [[String: Any]] ?? [])
       var ids = Set(rows.map(\.id))
-      rows += raw.compactMap(NativeNotice.parse).filter { ids.insert($0.id).inserted }
+      rows += raw.compactMap { NativeNotice.parse($0, kind: kind) }.filter { ids.insert($0.id).inserted }
       cursor = total["cursor"] as? [String: Any] ?? [:]
       hasMore = cursor["is_end"] as? Bool == false
+      // Loading the first page updates the service-side last-view cursor. Re-query, never guess zero.
+      if reset { await store.messageUnread.refresh(api: store.api) }
     } catch {
       if token == identity && !Task.isCancelled { self.error = error.localizedDescription }
     }
+  }
+}
+
+struct NativeNoticeComment: View {
+  @Bindable var store: Store
+  let notice: NativeNotice
+  @State private var comments = Comments()
+  @State private var retry = 0
+  @State private var originalPage: WebTarget?
+  @Environment(\.dismiss) private var dismiss
+  var body: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      HStack {
+        Text("评论回复").font(.title2.bold())
+        Spacer()
+        Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction)
+      }
+      ScrollViewReader { reader in
+        ScrollView {
+          LazyVStack(alignment: .leading, spacing: 16) {
+            if comments.loading { ProgressView("正在定位评论").frame(maxWidth: .infinity) }
+            if let target = notice.commentTarget {
+              ForEach(comments.items) { reply in
+                Text("消息中的评论").font(.caption).foregroundStyle(.secondary)
+                ReplyRow(reply: reply, store: store, aid: target.oid, comments: comments)
+                  .accessibilityIdentifier("focused-comment")
+              }
+              if !comments.focusedReplies.isEmpty {
+                Divider()
+                Text("同一条评论下的回复").font(.headline)
+                ForEach(comments.focusedReplies) { reply in
+                  ReplyRow(reply: reply, store: store, aid: target.oid, comments: comments)
+                  Divider()
+                }
+              }
+              if let root = comments.focusedRoot {
+                if let error = comments.childErrors[root.id] { Text(error).font(.caption).foregroundStyle(.secondary) }
+                if comments.childHasMore[root.id] != false {
+                  Button(comments.childLoading.contains(root.id) ? "加载中" : "加载更多回复") {
+                    Task { await comments.children(root, aid: target.oid, api: store.api, pageSize: 49) }
+                  }.disabled(comments.childLoading.contains(root.id)).buttonStyle(.glass)
+                }
+              }
+            }
+            CommentSubmissionReceipt(comments: comments).id("submission")
+            if let error = comments.error { ErrorBanner(text: error) { retry += 1 } }
+            if let url = notice.originalPageURL {
+              Button("查看原页面") { originalPage = WebTarget(url: url, title: "原页面") }.buttonStyle(.glass)
+            }
+          }.padding(4)
+        }.onChange(of: comments.sending) {
+          if !comments.sending, comments.submittedText != nil { reader.scrollTo("submission", anchor: .bottom) }
+        }
+      }
+    }.padding(22).frame(width: 720, height: 620).background { GlassBackdrop() }
+      .task(id: retry) {
+        if let target = notice.commentTarget { _ = await comments.loadFocused(target, api: store.api) }
+      }
+      .sheet(isPresented: Binding(get: { comments.replyingTo != nil }, set: { if !$0 { comments.replyingTo = nil } })) {
+        if let target = notice.commentTarget {
+          MacReplyComposerSheet(store: store, aid: target.oid, comments: comments, verificationURL: notice.originalPageURL)
+        }
+      }
+      .sheet(item: $originalPage) { target in CommentOriginalPage(store: store, target: target) }
   }
 }

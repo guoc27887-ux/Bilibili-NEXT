@@ -1,4 +1,5 @@
 import XCTest
+import UIKit
 
 @MainActor final class MobileSmokeTests: XCTestCase {
   override func setUpWithError() throws { continueAfterFailure = false }
@@ -182,7 +183,7 @@ import XCTest
     app.buttons["播放详情"].tap()
     XCTAssertTrue(waitForValue("rendered-frame-status", "是", app: app))
     app.buttons["完成"].tap()
-    let video = app.otherElements["video-player"].firstMatch
+    let video = app.otherElements["player-viewport"].firstMatch
     XCTAssertTrue(video.waitForExistence(timeout: 5))
     video.coordinate(withNormalizedOffset: CGVector(dx: 0.8, dy: 0.35)).press(forDuration: 2)
     app.buttons["播放详情"].tap()
@@ -229,6 +230,35 @@ import XCTest
     attach("favorite-saved-and-reopened", app: app)
     app.buttons["取消"].tap()
   }
+  func testMessageUnreadCountsAndLikeObjects() {
+    let app = XCUIApplication()
+    app.launchArguments = ["--qa-ui", "--qa-inbox"]
+    app.launch()
+    let likes = app.buttons["inbox-category-3"]
+    XCTAssertTrue(likes.waitForExistence(timeout: 10))
+    let unread = NSPredicate(format: "value == %@", "12 条未读")
+    expectation(for: unread, evaluatedWith: likes)
+    waitForExpectations(timeout: 8)
+    XCTAssertEqual(app.buttons["inbox-category-1"].value as? String, "4 条未读")
+    XCTAssertEqual(app.buttons["inbox-category-2"].value as? String, "2 条未读")
+    attach("message-unread-counts", app: app)
+    likes.tap()
+    XCTAssertTrue(app.staticTexts["示例用户等 12 人赞了你的视频"].waitForExistence(timeout: 8))
+    XCTAssertTrue(app.staticTexts["另一位用户赞了你的评论"].exists)
+    XCTAssertTrue(app.staticTexts["我发布的视频标题"].exists)
+    XCTAssertFalse(app.buttons["查看并回复"].exists)
+    attach("message-like-objects", app: app)
+    goBack(app)
+    XCTAssertTrue(likes.waitForExistence(timeout: 8))
+    XCTAssertEqual(likes.value as? String, "无未读")
+    XCTAssertEqual(app.buttons["inbox-category-1"].value as? String, "4 条未读")
+    app.buttons["inbox-category-1"].tap()
+    XCTAssertTrue(app.buttons["查看并回复"].waitForExistence(timeout: 8))
+    goBack(app)
+    XCTAssertEqual(app.buttons["inbox-category-1"].value as? String, "无未读")
+    XCTAssertEqual(app.buttons["inbox-category-2"].value as? String, "2 条未读")
+  }
+
   func testInboxLayoutCategoriesAndUnreadFilter() {
     let app = XCUIApplication()
     app.launchArguments = ["--qa-ui"]
@@ -243,10 +273,8 @@ import XCTest
     XCTAssertTrue(app.buttons["conversation-1:12"].exists)
     for kind in 1...3 {
       app.buttons["inbox-category-\(kind)"].tap()
-      if !app.staticTexts["这里显示被回复的原文。"].waitForExistence(timeout: 5) {
-        print(app.debugDescription)
-      }
-      XCTAssertTrue(app.staticTexts["这里显示被回复的原文。"].exists)
+      let expected = kind == 3 ? "示例用户等 12 人赞了你的视频" : "这里显示被回复的原文。"
+      XCTAssertTrue(app.staticTexts[expected].waitForExistence(timeout: 5))
       attach("inbox-category-\(kind)", app: app)
       goBack(app)
     }
@@ -633,6 +661,9 @@ import XCTest
   }
 
   func testLandscapeAutomaticallyPresentsFullscreen() throws {
+    guard UIDevice.current.userInterfaceIdiom == .phone else {
+      throw XCTSkip("iPad uses explicit fullscreen and keeps the detail column visible on rotation.")
+    }
     if ProcessInfo.processInfo.environment["SIMULATOR_MODEL_IDENTIFIER"] == "iPhone19,4" {
       throw XCTSkip("The installed iPhone Duo runtime does not deliver physical rotation; verify automatic fullscreen on iPhone hardware.")
     }
@@ -647,6 +678,159 @@ import XCTest
     attach("landscape-auto-fullscreen", app: app)
     XCUIDevice.shared.orientation = .portrait
     XCTAssertTrue(app.buttons["全屏"].waitForExistence(timeout: 10))
+  }
+
+  func testIPadPlayerRotationPreservesCommentsAndExplicitFullscreen() throws {
+    guard UIDevice.current.userInterfaceIdiom == .pad else { throw XCTSkip("iPad layout") }
+    XCUIDevice.shared.orientation = .landscapeLeft
+    defer { XCUIDevice.shared.orientation = .portrait }
+    let app = XCUIApplication()
+    app.launchArguments = ["--qa-ui", "--qa-navigation"]
+    app.launch()
+    maximizeIPadWindow()
+    let title = app.staticTexts["player-title"]
+    XCTAssertTrue(title.waitForExistence(timeout: 15))
+    let surface = app.otherElements["player-viewport"].firstMatch
+    XCTAssertTrue(surface.waitForExistence(timeout: 5))
+    XCTAssertTrue(app.buttons["全屏"].isHittable)
+    XCTAssertTrue(app.buttons["tablet-nav-recommend"].isHittable)
+    XCTAssertFalse(app.buttons["退出全屏"].exists)
+    XCTAssertGreaterThan(title.frame.minY, surface.frame.maxY)
+    attach("ipad-desktop-player", app: app)
+    let info = app.scrollViews["player-information"]
+    let comments = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "评论 ")).firstMatch
+    revealIPadElement(comments, scroll: info)
+    comments.tap()
+    let input = app.descendants(matching: .any).matching(identifier: "comment-draft").firstMatch
+    revealIPadElement(input, scroll: info)
+    input.tap()
+    input.typeText("iPad retained draft")
+    if app.buttons["Hide keyboard"].isHittable { app.buttons["Hide keyboard"].tap() }
+    info.swipeDown()
+    XCUIDevice.shared.orientation = .portrait
+    XCTAssertTrue(input.waitForExistence(timeout: 5))
+    XCTAssertEqual(input.value as? String, "iPad retained draft")
+    attach("ipad-portrait-comments", app: app)
+    XCUIDevice.shared.orientation = .landscapeLeft
+    revealIPadElement(input, scroll: info)
+    XCTAssertEqual(input.value as? String, "iPad retained draft")
+    for _ in 0..<8 {
+      if surface.frame.minY >= app.navigationBars["正在播放"].frame.maxY { break }
+      info.swipeDown()
+    }
+    app.buttons["全屏"].tap()
+    XCTAssertTrue(app.buttons["退出全屏"].waitForExistence(timeout: 5))
+    attach("ipad-explicit-fullscreen", app: app)
+    app.buttons["退出全屏"].tap()
+    XCTAssertTrue(app.buttons["全屏"].waitForExistence(timeout: 5))
+    revealIPadElement(input, scroll: info)
+    XCTAssertEqual(input.value as? String, "iPad retained draft")
+    app.buttons["收起播放器"].tap()
+    XCTAssertTrue(app.buttons["关闭播放器"].waitForExistence(timeout: 5))
+    app.buttons["tablet-nav-history"].tap()
+    XCTAssertTrue(app.buttons["关闭播放器"].exists)
+    app.buttons["mini-player-open"].tap()
+    XCTAssertTrue(title.waitForExistence(timeout: 5))
+    revealIPadElement(input, scroll: info)
+    XCTAssertEqual(input.value as? String, "iPad retained draft")
+  }
+
+  func testIPadBrowseGridAndNavigation() throws {
+    guard UIDevice.current.userInterfaceIdiom == .pad else { throw XCTSkip("iPad layout") }
+    XCUIDevice.shared.orientation = .landscapeLeft
+    defer { XCUIDevice.shared.orientation = .portrait }
+    let app = XCUIApplication()
+    app.launchArguments = ["--qa-ui", "--qa-ui-pages"]
+    app.launch()
+    maximizeIPadWindow()
+    let cards = app.buttons.matching(NSPredicate(format: "identifier BEGINSWITH %@", "video-card-"))
+    XCTAssertTrue(cards.firstMatch.waitForExistence(timeout: 15))
+    XCTAssertGreaterThanOrEqual(cards.count, 4)
+    XCTAssertGreaterThanOrEqual(cards.element(boundBy: 0).frame.width, 240)
+    XCTAssertEqual(cards.element(boundBy: 0).frame.minY, cards.element(boundBy: 2).frame.minY, accuracy: 2)
+    XCTAssertLessThan(app.buttons["tablet-nav-recommend"].frame.maxX, cards.firstMatch.frame.minX)
+    attach("ipad-desktop-browse", app: app)
+    app.buttons["tablet-nav-messages"].tap()
+    XCTAssertTrue(app.buttons["inbox-system"].waitForExistence(timeout: 5))
+    attach("ipad-desktop-inbox", app: app)
+    app.buttons["tablet-nav-history"].tap()
+    XCTAssertTrue(app.navigationBars["观看记录"].waitForExistence(timeout: 5))
+    app.buttons["设置"].tap()
+    XCTAssertTrue(app.navigationBars["设置"].waitForExistence(timeout: 5))
+    let search = app.textFields["tablet-search"]
+    search.tap()
+    search.typeText("iPad\n")
+    XCTAssertTrue(app.navigationBars["iPad"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.buttons["搜索筛选"].exists)
+    XCTAssertFalse(app.searchFields.firstMatch.exists)
+    attach("ipad-desktop-search", app: app)
+  }
+
+  func testIPadAccessibilityPlayerUsesStackedLayout() throws {
+    guard UIDevice.current.userInterfaceIdiom == .pad else { throw XCTSkip("iPad layout") }
+    XCUIDevice.shared.orientation = .landscapeLeft
+    defer { XCUIDevice.shared.orientation = .portrait }
+    let app = XCUIApplication()
+    app.launchArguments = ["--qa-ui", "--qa-navigation", "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+    app.launch()
+    maximizeIPadWindow()
+    let info = app.scrollViews["player-information"]
+    XCTAssertTrue(info.waitForExistence(timeout: 15))
+    XCTAssertTrue(app.buttons["全屏"].isHittable)
+    XCTAssertTrue(app.buttons["显示侧栏"].isHittable)
+    revealIPadElement(app.buttons["video-favorite"], scroll: info)
+    app.buttons["video-favorite"].tap()
+    XCTAssertTrue(app.navigationBars["收藏"].waitForExistence(timeout: 5))
+    attach("ipad-accessibility-favorites", app: app)
+  }
+
+  func testIPadNarrowWindowKeepsPlayerAndDetailsReachable() throws {
+    guard UIDevice.current.userInterfaceIdiom == .pad else { throw XCTSkip("iPad layout") }
+    XCUIDevice.shared.orientation = .landscapeLeft
+    defer { XCUIDevice.shared.orientation = .portrait }
+    let app = XCUIApplication()
+    app.launchArguments = ["--qa-ui", "--qa-navigation"]
+    app.launch()
+    maximizeIPadWindow()
+    let info = app.scrollViews["player-information"]
+    let surface = app.otherElements["player-viewport"].firstMatch
+    XCTAssertTrue(info.waitForExistence(timeout: 15))
+    let grabber = app.coordinate(withNormalizedOffset: CGVector(dx: 0.995, dy: 0.99))
+    let target = app.coordinate(withNormalizedOffset: CGVector(dx: 0.48, dy: 0.86))
+    grabber.press(forDuration: 0.2, thenDragTo: target)
+    XCTAssertTrue(app.buttons["显示侧栏"].waitForExistence(timeout: 8))
+    XCTAssertLessThan(surface.frame.width, 700)
+    XCTAssertTrue(app.buttons["全屏"].isHittable)
+    revealIPadElement(app.staticTexts["player-title"], scroll: info)
+    attach("ipad-narrow-window", app: app)
+    app.buttons["显示侧栏"].tap()
+    XCTAssertTrue(app.buttons["tablet-nav-history"].waitForExistence(timeout: 5))
+    app.buttons["tablet-nav-history"].tap()
+    XCTAssertTrue(app.navigationBars["观看记录"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.buttons["mini-player-open"].exists)
+    maximizeIPadWindow()
+  }
+
+  private func revealIPadElement(_ element: XCUIElement, scroll: XCUIElement) {
+    for _ in 0..<12 {
+      if element.exists && element.isHittable
+        && element.frame.minY >= scroll.frame.minY + 80
+        && element.frame.maxY <= scroll.frame.maxY - 20 { break }
+      scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.8)).press(
+        forDuration: 0.1, thenDragTo: scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)))
+    }
+    XCTAssertTrue(element.isHittable)
+  }
+
+  private func maximizeIPadWindow() {
+    let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+    let controls = springboard.buttons["window-controls:com.wzk112.BilibiliNEXT.iOS"]
+    if controls.exists && controls.isHittable {
+      controls.tap()
+      let zoom = springboard.buttons["Zoom-button"]
+      XCTAssertTrue(zoom.waitForExistence(timeout: 5))
+      zoom.tap()
+    }
   }
 
   private func goBack(_ app: XCUIApplication) {
@@ -668,7 +852,10 @@ import XCTest
   }
 
   private func attach(_ name: String, app: XCUIApplication) {
-    let attachment = XCTAttachment(screenshot: app.screenshot())
+    // App-only screenshots can be cropped with stale orientation after iPad window resizing.
+    let screenshot = UIDevice.current.userInterfaceIdiom == .pad
+      ? XCUIScreen.main.screenshot() : app.screenshot()
+    let attachment = XCTAttachment(screenshot: screenshot)
     attachment.name = name
     attachment.lifetime = .keepAlways
     add(attachment)

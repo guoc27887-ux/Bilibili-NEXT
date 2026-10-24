@@ -6,11 +6,15 @@ macOS 新手指南和更新说明可从“帮助”菜单或“设置 → 关于
 
 <img src="Assets/Bilibili-NEXT-macOS.svg" width="128" alt="Bilibili NEXT icon">
 
-面向 macOS 26+、iOS / iPadOS 26+ 的非官方哔哩哔哩客户端，主要使用 SwiftUI、Liquid Glass 和 AVPlayer。本次双端发布包含 macOS 1.1.0（Apple silicon）与 iOS / iPadOS 0.1.0 开发预览（需要自签的 IPA）。
+面向 macOS 26+、iOS / iPadOS 26+ 的非官方哔哩哔哩客户端，主要使用 SwiftUI、Liquid Glass 和 AVPlayer。本次双端发布包含 macOS 1.1.1（Apple silicon）与 iOS / iPadOS 0.1.1 开发预览（需要自签的 IPA）。
 
 从 [GitHub Releases](https://github.com/wzk112/Bilibili-NEXT/releases/latest) 下载 Apple silicon 发布包，解压后将 `Bilibili NEXT.app` 放入应用程序目录。扫码登录后，登录信息保存在 macOS 钥匙串。开发构建使用本机已有的 Apple Development 签名；从早期临时签名版本迁移时，系统可能要求重新授权一次。
 
 当前发布包未进行 Developer ID 公证，其他 Mac 的系统信任流程尚未验证；也可以下载源码自行构建。
+
+## 本次更新
+
+修复部分媒体地址/备用流解析导致的播放失败，优化 4K 画质切换；Mac 增加首选编码设置，两端增加消息未读数和明确的点赞对象文案，iPad 增加随窗口变化的侧栏与播放布局。详细变化见 [CHANGELOG.md](CHANGELOG.md)。如果仍无法播放，请提供版本、设备、BV 号、网络类型，以及播放错误页的“复制诊断”结果。
 
 ## 使用
 
@@ -84,7 +88,7 @@ Scripts/build-app.sh
 
 <img src="Assets/Bilibili-NEXT-iOS.svg" width="112" alt="Bilibili NEXT iOS icon">
 
-从 [v1.1.0 双端发布页](https://github.com/wzk112/Bilibili-NEXT/releases/tag/v1.1.0) 下载 `Bilibili-NEXT-0.1.0-iOS-unsigned.ipa`。**此 IPA 未签名，需要自行签名后安装，不能直接点击安装。** 使用自己的 Apple Account / 开发者证书和适用的描述文件完成签名；开发签名按系统提示启用开发者模式并信任开发者。签名有效期、设备限制和续签要求由自己的签名方式决定。当前没有 TestFlight / App Store 版本。安装与构建说明见 [IOS_INSTALL.md](IOS_INSTALL.md)。
+从 [v1.1.1 双端发布页](https://github.com/wzk112/Bilibili-NEXT/releases/tag/v1.1.1) 下载 `Bilibili-NEXT-0.1.1-iOS-unsigned.ipa`。**此 IPA 未签名，需要自行签名后安装，不能直接点击安装。** 使用自己的 Apple Account / 开发者证书和适用的描述文件完成签名；开发签名按系统提示启用开发者模式并信任开发者。签名有效期、设备限制和续签要求由自己的签名方式决定。当前没有 TestFlight / App Store 版本。安装与构建说明见 [IOS_INSTALL.md](IOS_INSTALL.md)。
 
 已有独立的原生 iOS Xcode 工程：[Apps/iOS/BilibiliNEXT.xcodeproj](Apps/iOS/BilibiliNEXT.xcodeproj)。当前实现、真机验证和待迁移功能见 [IOS_STATUS.md](IOS_STATUS.md)；完整目标范围见 [IOS_APP_PLAN.md](IOS_APP_PLAN.md)。
 

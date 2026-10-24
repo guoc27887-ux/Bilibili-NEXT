@@ -58,6 +58,7 @@ private struct FeedSnapshot: Codable {
   let comments = Comments()
   let videoActions = VideoActionsModel()
   let inbox = InboxModel()
+  let messageUnread = MessageUnreadModel()
   let accountHistory = AccountHistory()
   let historySync = WatchHistorySync()
   let extras = VideoExtras()
@@ -112,6 +113,9 @@ private struct FeedSnapshot: Codable {
     guide.store = self
     if let data = UserDefaults.standard.data(forKey: "history") {
       history = (try? JSONDecoder().decode([HistoryEntry].self, from: data)) ?? []
+    }
+    inbox.onRead = { [weak self] in
+      guard let self else { return }; await self.messageUnread.refresh(api: self.api)
     }
     playback.onProgress = { [weak self] bvid, cid, seconds, final in
       self?.saveProgress(bvid, cid: cid, seconds: seconds, final: final)
@@ -500,7 +504,7 @@ private struct FeedSnapshot: Codable {
     feedSnapshots.removeAll()
     UserDefaults.standard.removeObject(forKey: "homeFeedSnapshot")
     videoActions.clear()
-    inbox.clear()
+    inbox.clear(); messageUnread.reset()
     accountHistory.reset()
     playback.stop()
     historySync.reset()

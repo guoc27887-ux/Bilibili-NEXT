@@ -19,7 +19,7 @@ struct MobileVideoPlayer: View {
     }
     .onDisappear { onScreen = false }
     .task {
-      guard !checkedInitialOrientation else { return }
+      guard UIDevice.current.userInterfaceIdiom == .phone, !checkedInitialOrientation else { return }
       checkedInitialOrientation = true
       // Let the presenting player finish its transition before opening another cover.
       do { try await Task.sleep(for: .milliseconds(400)) } catch { return }
@@ -31,6 +31,8 @@ struct MobileVideoPlayer: View {
       }
     }
     .onReceive(NotificationCenter.default.publisher(for: UIDevice.orientationDidChangeNotification)) { _ in
+      // iPad rotation and multitasking resize the inline player; fullscreen is explicit.
+      guard UIDevice.current.userInterfaceIdiom == .phone else { return }
       let orientation = UIDevice.current.orientation
       store.orientationDiagnostics = ["device": String(orientation.rawValue), "onScreen": String(onScreen), "showPlayer": String(store.showPlayer)]
       if orientation.isPortrait {
@@ -136,6 +138,8 @@ struct MobileVideoSurface: View {
               .accessibilityIdentifier("player-fullscreen-toggle")
           }.frame(minHeight: 44).padding(.horizontal, 12)
         }.padding(.horizontal, fullscreen ? 16 : 0).padding(.vertical, fullscreen ? 8 : 0)
+          // Keep transport controls usable in narrow windows at accessibility text sizes.
+          .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
           .font(.subheadline.weight(.medium)).buttonStyle(.plain).foregroundStyle(.white).tint(.white)
       }
       if store.playback.loading || store.playback.buffering {

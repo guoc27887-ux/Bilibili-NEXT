@@ -34,6 +34,7 @@ struct Thumbnail: View {
 }
 struct MobileVideoCard: View {
   let video: Video
+  @ScaledMetric(relativeTo: .subheadline) private var titleHeight = 38
   var body: some View {
     VStack(alignment: .leading, spacing: 9) {
       Thumbnail(url: video.cover).aspectRatio(16 / 9, contentMode: .fit).clipShape(
@@ -45,9 +46,21 @@ struct MobileVideoCard: View {
         ).foregroundStyle(.white).padding(7)
       }
       Text(video.title).font(.subheadline.weight(.medium)).lineLimit(2).frame(
-        maxWidth: .infinity, minHeight: 38, alignment: .topLeading)
-      Text(video.author).font(.caption).foregroundStyle(.secondary).lineLimit(1)
-    }.contentShape(Rectangle())
+        maxWidth: .infinity, minHeight: titleHeight, alignment: .topLeading)
+      HStack {
+        Text(video.author).lineLimit(1)
+        if UIDevice.current.userInterfaceIdiom == .pad {
+          Spacer(minLength: 4)
+          Label(compactCount(video.views), systemImage: "play")
+            .lineLimit(1)
+        }
+      }.font(.caption).foregroundStyle(.secondary)
+    }.padding(UIDevice.current.userInterfaceIdiom == .pad ? 12 : 0)
+      .background {
+        if UIDevice.current.userInterfaceIdiom == .pad {
+          RoundedRectangle(cornerRadius: 22).fill(.regularMaterial)
+        }
+      }.contentShape(Rectangle())
   }
 }
 func clock(_ raw: Double) -> String {
@@ -112,11 +125,14 @@ struct MobileVideoGrid: View {
   let videos: [Video]
   @Bindable var store: Store
   @Environment(\.dynamicTypeSize) private var textSize
+  @Environment(\.horizontalSizeClass) private var sizeClass
   var body: some View {
     LazyVGrid(
       columns: [
         GridItem(
-          .adaptive(minimum: textSize.isAccessibilitySize ? 280 : 160, maximum: 400), spacing: 14)
+          .adaptive(
+            minimum: textSize.isAccessibilitySize ? 280 : sizeClass == .regular ? 240 : 160,
+            maximum: 400), spacing: UIDevice.current.userInterfaceIdiom == .pad ? 18 : 14)
       ], alignment: .leading, spacing: 20
     ) {
       ForEach(videos) { video in
@@ -125,6 +141,7 @@ struct MobileVideoGrid: View {
         } label: {
           MobileVideoCard(video: video)
         }.buttonStyle(.plain)
+          .accessibilityIdentifier("video-card-" + video.bvid)
           .contextMenu {
             Button("播放", systemImage: "play") { store.open(video.bvid) }
             Button("复制链接", systemImage: "link") {
@@ -212,8 +229,20 @@ struct MobileRoot: View {
   @Bindable var store: Store
   @State private var selectedTab = 0
   @AppStorage("appearance") private var appearance = "system"
-  @Environment(\.horizontalSizeClass) private var width
   var body: some View {
+    Group {
+      if UIDevice.current.userInterfaceIdiom == .pad {
+        MobileTabletRoot(store: store)
+      } else {
+        phoneTabs.modifier(MobilePlayerAccessory(store: store))
+      }
+    }
+    .tint(biliPink).preferredColorScheme(
+      appearance == "system" ? nil : appearance == "dark" ? .dark : .light
+    )
+    .modifier(MobileRootPresentation(store: store))
+  }
+  private var phoneTabs: some View {
     TabView(selection: $selectedTab) {
       Tab("首页", systemImage: "house", value: 0) {
         NavigationStack { MobileHome(store: store) }
@@ -223,16 +252,14 @@ struct MobileRoot: View {
       }
       Tab("消息", systemImage: "bubble.left.and.bubble.right", value: 2) {
         NavigationStack { MobileInbox(store: store) }
-      }
+      }.badge(store.messageUnread.counts.total)
       Tab("资料库", systemImage: "square.stack", value: 3) {
         NavigationStack { MobileLibrary(store: store) }
       }
       Tab("我的", systemImage: "person.crop.circle", value: 4) {
         NavigationStack { MobileAccount(store: store) }
       }
-    }.tint(biliPink).preferredColorScheme(
-      appearance == "system" ? nil : appearance == "dark" ? .dark : .light
-    )
+    }
     .onAppear {
       #if DEBUG
         if MobileUIFixture.enabled && ProcessInfo.processInfo.arguments.contains("--qa-inbox") {
@@ -241,48 +268,61 @@ struct MobileRoot: View {
       #endif
     }
 
-    .modifier(MobilePlayerAccessory(store: store))
-    .fullScreenCover(
-      isPresented: Binding(
-        get: { store.showPlayer && !store.conversationPresented },
-        set: { if !store.conversationPresented { store.showPlayer = $0 } }),
-      onDismiss: { store.playback.saveCurrentProgress() }
-    ) {
-      MobilePlayerPage(store: store)
-    }
-    .sheet(
-      isPresented: Binding(
-        get: { store.showLogin && !store.showPlayer && !store.conversationPresented },
-        set: { store.showLogin = $0 }),
-      onDismiss: { store.closeLogin() }
-    ) { MobileLogin(store: store) }
-    .sheet(
-      item: Binding(
-        get: { store.showPlayer || store.conversationPresented ? nil : store.webTarget },
-        set: { store.webTarget = $0 })
-    ) { target in MobileWebPage(store: store, target: target) }
-    .alert(
-      "提示",
-      isPresented: Binding(get: { store.message != nil }, set: { if !$0 { store.message = nil } })
-    ) {
-      Button("好", role: .cancel) { store.message = nil }
-    } message: {
-      Text(store.message ?? "")
-    }
+  }
+}
+private struct MobileRootPresentation: ViewModifier {
+  @Bindable var store: Store
+  func body(content: Content) -> some View {
+    content
+      .fullScreenCover(
+        isPresented: Binding(
+          get: {
+            UIDevice.current.userInterfaceIdiom != .pad && store.showPlayer
+              && !store.conversationPresented
+          },
+          set: { if !store.conversationPresented { store.showPlayer = $0 } }),
+        onDismiss: { store.playback.saveCurrentProgress() }
+      ) {
+        MobilePlayerPage(store: store)
+      }
+      .sheet(
+        isPresented: Binding(
+          get: { store.showLogin && !store.showPlayer && !store.conversationPresented },
+          set: { store.showLogin = $0 }),
+        onDismiss: { store.closeLogin() }
+      ) { MobileLogin(store: store) }
+      .sheet(
+        item: Binding(
+          get: { store.showPlayer || store.conversationPresented ? nil : store.webTarget },
+          set: { store.webTarget = $0 })
+      ) { target in MobileWebPage(store: store, target: target) }
+      .alert(
+        "提示",
+        isPresented: Binding(get: { store.message != nil }, set: { if !$0 { store.message = nil } })
+      ) {
+        Button("好", role: .cancel) { store.message = nil }
+      } message: {
+        Text(store.message ?? "")
+      }
   }
 }
 struct MobileHome: View {
   @Bindable var store: Store
+  var destination: Int? = nil
   @State private var tab = 0
   @State private var region = 1005
   @State private var feeds = MobileHomeFeeds()
   var body: some View {
+    let tab = destination ?? tab
     VStack(spacing: 0) {
-      Picker("浏览", selection: $tab) {
-        Text("推荐").tag(0)
-        Text("热门").tag(1)
-        Text("分区").tag(2)
-      }.pickerStyle(.segmented).padding(.horizontal).padding(.bottom, 10)
+      if destination == nil {
+        Picker("浏览", selection: $tab) {
+          Text("推荐").tag(0)
+          Text("热门").tag(1)
+          Text("分区").tag(2)
+        }.pickerStyle(.segmented).frame(maxWidth: 640)
+          .padding(.horizontal).padding(.bottom, 10).frame(maxWidth: .infinity)
+      }
       if tab == 2 {
         Picker("分区", selection: $region) { ForEach(VideoRegion.all) { Text($0.title).tag($0.id) } }
           .pickerStyle(.menu).padding(.horizontal)
@@ -295,9 +335,13 @@ struct MobileHome: View {
         if tab == 1 { return try await store.api.popular(page: page) }
         return try await store.api.regionVideos(region, page: page)
       }.id("\(tab):\(region):\(store.account?.mid ?? 0)")
-    }.navigationTitle("Bilibili NEXT").navigationBarTitleDisplayMode(.large)
-      .onChange(of: store.account?.mid) { _, _ in feeds = MobileHomeFeeds() }
-      .toolbar {
+    }.navigationTitle(
+      destination == nil ? "Bilibili NEXT" : tab == 0 ? "推荐" : tab == 1 ? "热门" : "分区"
+    )
+    .navigationBarTitleDisplayMode(.large)
+    .onChange(of: store.account?.mid) { _, _ in feeds = MobileHomeFeeds() }
+    .toolbar {
+      if destination == nil {
         ToolbarItem(placement: .topBarTrailing) {
           NavigationLink {
             MobileSearch(store: store)
@@ -306,10 +350,26 @@ struct MobileHome: View {
           }.accessibilityLabel("搜索")
         }
       }
+    }
+  }
+}
+private struct MobileSearchField: ViewModifier {
+  @Binding var text: String
+  var enabled: Bool
+  func body(content: Content) -> some View {
+    if enabled {
+      content.searchable(
+        text: $text, placement: .navigationBarDrawer(displayMode: .always),
+        prompt: "关键词、BV 号或视频链接")
+    } else {
+      content
+    }
   }
 }
 struct MobileSearch: View {
   @Bindable var store: Store
+  var initialQuery = ""
+  var showsSearchField = true
   @State private var text = ""
   @State private var query = ""
   @State private var options = SearchOptions()
@@ -378,61 +438,60 @@ struct MobileSearch: View {
           try await store.api.search(query, page: page, options: options)
         }.id("\(query):\(options)")
       }
-    }.navigationTitle("搜索").searchable(
-      text: $text, placement: .navigationBarDrawer(displayMode: .always),
-      prompt: "关键词、BV 号或视频链接"
-    )
-    .onSubmit(of: .search) { submit(text) }
-    .onChange(of: text) { _, value in
-      if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { query = "" }
-    }
-    .task(id: text) {
-      suggestions = []
-      guard !text.isEmpty else { return }
-      do {
-        try await Task.sleep(for: .milliseconds(250))
-        let result = try await store.api.suggestions(text)
-        try Task.checkCancellation()
-        suggestions = result
-      } catch {}
-    }
-    .toolbar {
-      Button {
-        filters = true
-      } label: {
-        Image(systemName: "line.3.horizontal.decrease")
-      }.accessibilityLabel("搜索筛选")
-    }
-    .sheet(isPresented: $filters) {
-      NavigationStack {
-        Form {
-          Picker("搜索类型", selection: $options.users) {
-            Text("视频").tag(false)
-            Text("用户").tag(true)
-          }
-          Picker("排序", selection: $options.order) {
-            Text("综合").tag("totalrank")
-            Text("最多播放").tag("click")
-            Text("最新").tag("pubdate")
-            Text("最多弹幕").tag("dm")
-            Text("最多收藏").tag("stow")
-          }
-          Picker("时长", selection: $options.duration) {
-            Text("全部").tag(0)
-            Text("10分钟以下").tag(1)
-            Text("10–30分钟").tag(2)
-            Text("30–60分钟").tag(3)
-            Text("60分钟以上").tag(4)
-          }
-          Picker("发布", selection: $options.days) {
-            Text("全部").tag(0)
-            Text("最近一天").tag(1)
-            Text("最近一周").tag(7)
-            Text("最近半年").tag(180)
-          }
-        }.navigationTitle("搜索筛选").toolbar { Button("完成") { filters = false } }
-      }.presentationDetents([.medium, .large])
-    }
+    }.task { if query.isEmpty && !initialQuery.isEmpty { submit(initialQuery) } }
+      .navigationTitle("搜索")
+      .modifier(MobileSearchField(text: $text, enabled: showsSearchField))
+      .onSubmit(of: .search) { submit(text) }
+      .onChange(of: text) { _, value in
+        if value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { query = "" }
+      }
+      .task(id: text) {
+        suggestions = []
+        guard !text.isEmpty else { return }
+        do {
+          try await Task.sleep(for: .milliseconds(250))
+          let result = try await store.api.suggestions(text)
+          try Task.checkCancellation()
+          suggestions = result
+        } catch {}
+      }
+      .toolbar {
+        Button {
+          filters = true
+        } label: {
+          Image(systemName: "line.3.horizontal.decrease")
+        }.accessibilityLabel("搜索筛选")
+      }
+      .sheet(isPresented: $filters) {
+        NavigationStack {
+          Form {
+            Picker("搜索类型", selection: $options.users) {
+              Text("视频").tag(false)
+              Text("用户").tag(true)
+            }
+            Picker("排序", selection: $options.order) {
+              Text("综合").tag("totalrank")
+              Text("最多播放").tag("click")
+              Text("最新").tag("pubdate")
+              Text("最多弹幕").tag("dm")
+              Text("最多收藏").tag("stow")
+            }
+            Picker("时长", selection: $options.duration) {
+              Text("全部").tag(0)
+              Text("10分钟以下").tag(1)
+              Text("10–30分钟").tag(2)
+              Text("30–60分钟").tag(3)
+              Text("60分钟以上").tag(4)
+            }
+            Picker("发布", selection: $options.days) {
+              Text("全部").tag(0)
+              Text("最近一天").tag(1)
+              Text("最近一周").tag(7)
+              Text("最近半年").tag(180)
+            }
+          }.navigationTitle("搜索筛选").toolbar { Button("完成") { filters = false } }
+        }.presentationDetents([.medium, .large])
+      }
   }
   private func submit(_ term: String) {
     let term = term.trimmingCharacters(in: .whitespacesAndNewlines)

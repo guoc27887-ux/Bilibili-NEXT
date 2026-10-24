@@ -38,7 +38,7 @@ actor PlaybackDiskCache: HTTPRangeStreaming {
        root: URL = PlaybackTemporaryFiles.root) throws {
     self.source = source; self.videoURLs = videoURLs
     self.streamDuringStartup = streamDuringStartup
-    permits = VideoStreamPermits(limit: max(1, min(32, connections)))
+    permits = VideoStreamPermits(limit: max(1, min(32, connections)), startup: streamDuringStartup)
     self.capacity = capacity; self.reserveSpace = reserveSpace
     prefetchConnections = max(1, min(32, connections))
     directory = root.appendingPathComponent("\(getpid())-\(UUID().uuidString)", isDirectory: true)
@@ -53,8 +53,10 @@ actor PlaybackDiskCache: HTTPRangeStreaming {
   }
   deinit { Darwin.close(lease) }
 
-  func start() {
+  func start() async {
     guard !stopped else { return }; started = true
+    await permits.finishStartup()
+    guard !stopped else { return }
     for url in tracks.keys { startWorker(url) }
   }
   func stop() async {

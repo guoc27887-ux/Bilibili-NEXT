@@ -57,10 +57,15 @@ struct MobileInbox: View {
           }.buttonStyle(.plain).padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 22)
         }
         HStack(spacing: 12) {
+          Text("私信").font(.subheadline.weight(.semibold))
+          MessageUnreadBadge(count: store.messageUnread.counts.privateMessages)
           filter("全部", unread: false)
           filter("未读", unread: true)
           Spacer(minLength: 0)
         }.padding(.horizontal, 16).padding(.bottom, 8)
+        if let error = store.messageUnread.error {
+          HStack { Text(error).font(.caption).foregroundStyle(.secondary); Button("重试") { Task { await store.messageUnread.refresh(api: store.api) } } }.padding(.horizontal, 16)
+        }
         if store.account == nil {
           ContentUnavailableView {
             Label("登录后查看消息", systemImage: "bubble.left.and.bubble.right")
@@ -81,7 +86,7 @@ struct MobileInbox: View {
           }
           if store.inbox.loading { ProgressView("正在加载会话").frame(maxWidth: .infinity) }
           if let error = store.inbox.error {
-            MobileError(text: error) { Task { await store.inbox.load(api: store.api) } }
+            MobileError(text: error) { Task { await store.inbox.load(api: store.api); await store.messageUnread.refresh(api: store.api) } }
           }
           if conversations.isEmpty && !store.inbox.loading && store.inbox.error == nil {
             ContentUnavailableView(
@@ -94,7 +99,7 @@ struct MobileInbox: View {
               .frame(maxWidth: .infinity, minHeight: 44)
           }
         }
-      }
+      }.frame(maxWidth: 840).frame(maxWidth: .infinity)
     }.background(MobileSurface.background)
       .navigationTitle("消息").navigationBarTitleDisplayMode(.inline)
       .toolbarBackground(MobileSurface.background, for: .navigationBar)
@@ -121,17 +126,18 @@ struct MobileInbox: View {
             .navigationBarTitleDisplayMode(.inline)
         }
       }
-      .refreshable { if store.account != nil { await store.inbox.load(api: store.api) } }
+      .refreshable { if store.account != nil { await store.inbox.load(api: store.api); await store.messageUnread.refresh(api: store.api) } }
       .task(id: store.account?.mid) {
-        if store.account != nil { await store.inbox.load(api: store.api) }
+        if store.account != nil { await store.inbox.load(api: store.api); await store.messageUnread.refresh(api: store.api) }
       }
   }
   private func shortcut(_ title: String, icon: String, color: Color, kind: Int) -> some View {
     Button {
       destination = kind
     } label: {
-      MobileInboxShortcut(title: title, icon: icon, color: color)
-    }.accessibilityIdentifier("inbox-category-\(kind)")
+      MobileInboxShortcut(title: title, icon: icon, color: color, unread: store.messageUnread.counts[kind])
+    }.accessibilityValue(store.messageUnread.counts[kind] > 0 ? "\(store.messageUnread.counts[kind]) 条未读" : "无未读")
+      .accessibilityIdentifier("inbox-category-\(kind)")
   }
   private func filter(_ title: String, unread: Bool) -> some View {
     Button {
@@ -152,11 +158,13 @@ private struct MobileInboxShortcut: View {
   let title: String
   let icon: String
   let color: Color
+  var unread = 0
   var body: some View {
     VStack(spacing: 10) {
       Image(systemName: icon).font(.system(size: 25, weight: .semibold))
         .frame(width: 54, height: 54).foregroundStyle(color)
         .glassEffect(.regular, in: .rect(cornerRadius: 16))
+        .overlay(alignment: .topTrailing) { MessageUnreadBadge(count: unread).offset(x: 12, y: -12) }
       Text(title).font(.caption.weight(.medium)).foregroundStyle(.primary)
         .multilineTextAlignment(.center).fixedSize(horizontal: false, vertical: true)
     }.frame(maxWidth: .infinity).padding(.vertical, 4).contentShape(Rectangle())

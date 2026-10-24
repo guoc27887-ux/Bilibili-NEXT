@@ -17,6 +17,21 @@ public struct BiliMediaCDNURLPolicy: Sendable {
 
     public init() {}
 
+    /// Normalize API-provided HTTP and scheme-relative CDN URLs before validation.
+    /// Transport remains HTTPS-only. Never rewrite a host, path, signed query or
+    /// nonstandard port; callers can use a validated backup when a node is rejected.
+    public func normalizedURL(_ raw: String) -> URL? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard var components = URLComponents(string: value.hasPrefix("//") ? "https:" + value : value)
+        else { return nil }
+        if components.scheme?.lowercased() == "http" {
+            components.scheme = "https"
+            if components.port == 80 { components.port = nil }
+        }
+        guard let url = components.url, allows(url) else { return nil }
+        return url
+    }
+
     public func allows(_ url: URL) -> Bool {
         guard publicHTTPSPolicy.allows(url),
             let host = url.host?.lowercased()

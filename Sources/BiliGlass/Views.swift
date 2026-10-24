@@ -4,6 +4,7 @@ import SwiftUI
 let biliPink = Color(red: 0.86, green: 0.24, blue: 0.43)
 struct RootView: View {
   @Bindable var store: Store
+  @Environment(\.scenePhase) private var phase
   @FocusState private var searchFocused: Bool
   @State private var diagnosticChallenge: InteractionChallenge?
   var body: some View {
@@ -100,6 +101,7 @@ struct RootView: View {
         await Diagnostics.fullCoinCheck(api: store.api, bvid: args[i + 1], output: URL(fileURLWithPath: args[i + 2]),
           showChallenge: args.contains("--show-coin-challenge") ? { diagnosticChallenge = $0 } : nil)
       }
+      if let i = args.firstIndex(of: "--message-read-checks"), args.indices.contains(i + 1) { await Diagnostics.messageReadCheck(store: store, output: URL(fileURLWithPath: args[i + 1])) }
       if let i = args.firstIndex(of: "--feature-read-checks"), args.indices.contains(i + 1) { await Diagnostics.featureReadChecks(store: store, output: URL(fileURLWithPath: args[i + 1])) }
       if let i = args.firstIndex(of: "--preview-read-check"), args.indices.contains(i + 2) { await Diagnostics.previewReadCheck(api: store.api, bvid: args[i + 1], output: URL(fileURLWithPath: args[i + 2])) }
       if let i = args.firstIndex(of: "--special-diagnostics"), args.indices.contains(i + 2) {
@@ -124,6 +126,11 @@ struct RootView: View {
       if let i = args.firstIndex(of: "--state-output"), args.indices.contains(i + 1) {
         await Diagnostics.state(store: store, output: URL(fileURLWithPath: args[i + 1]))
       }
+    }
+    .task(id: "\(phase):\(store.api.authenticationGeneration):\(store.account?.mid ?? 0)") {
+      guard store.account != nil else { store.messageUnread.reset(); return }
+      guard phase == .active else { return }
+      await store.messageUnread.poll(api: store.api)
     }
     .onDisappear {
       store.playback.stop()
@@ -176,6 +183,7 @@ struct RootView: View {
             Image(systemName: d.icon).frame(width: 20)
             Text(d.rawValue)
             Spacer(minLength: 0)
+            if d == .messages { MessageUnreadBadge(count: store.messageUnread.counts.total) }
             if d == .downloads && store.downloads.activeCount > 0 {
               Text("\(store.downloads.activeCount)").font(.caption.monospacedDigit())
             }

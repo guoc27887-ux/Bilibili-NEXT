@@ -9,6 +9,32 @@ import Synchronization
 import WebKit
 
 @MainActor enum Diagnostics {
+  /// Explicit QA only: read notification pages and keep counters/schema, never message bodies or credentials.
+  static func messageReadCheck(store: Store, output: URL) async {
+    func snapshot() -> [String: Any] {
+      let counts = store.messageUnread.counts
+      return ["reply": counts.replies, "at": counts.mentions, "like": counts.likes,
+        "private": counts.privateMessages, "total": counts.total, "error": store.messageUnread.error ?? ""]
+    }
+    await store.messageUnread.refresh(api: store.api)
+    var result: [String: Any] = ["before": snapshot()]
+    for (index, endpoint) in ["reply", "at", "like"].enumerated() {
+      do {
+        let data = try await store.api.request("/x/msgfeed/" + endpoint, ["platform": "web", "mobi_app": "web"])
+        let total = data["total"] as? [String: Any] ?? data
+        let latest = data["latest"] as? [String: Any] ?? [:]
+        let raw = (latest["items"] as? [[String: Any]] ?? []) + (total["items"] as? [[String: Any]] ?? [])
+        let notices = raw.compactMap { NativeNotice.parse($0, kind: index + 1) }
+        await store.messageUnread.refresh(api: store.api)
+        result[endpoint] = ["loaded": notices.count, "after": snapshot(),
+          "actions": Array(Set(notices.map(\.action))).sorted(),
+          "itemKeys": Array(Set(raw.flatMap { ($0["item"] as? [String: Any] ?? [:]).keys })).sorted()]
+      } catch { result[endpoint] = error.localizedDescription }
+    }
+    if let data = try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]) {
+      try? data.write(to: output, options: .atomic)
+    }
+  }
   /// Opt-in check against an already-full video only. Never spend a test coin.
   static func fullCoinCheck(api: API, bvid: String, output: URL,
                             showChallenge: ((InteractionChallenge) -> Void)? = nil) async {
@@ -400,6 +426,8 @@ import WebKit
     guard let item = p.player.currentItem else { return [:] }
     let duration = item.duration.seconds
     return ["status": item.status.rawValue, "duration": duration.isFinite ? duration : -1,
+            "time": p.player.currentTime().seconds.isFinite ? p.player.currentTime().seconds : -1,
+            "rate": p.player.rate, "waitingReason": p.player.reasonForWaitingToPlay?.rawValue ?? "",
             "canPlayFastForward": item.canPlayFastForward, "volume": p.player.volume, "muted": p.player.isMuted,
             "bufferEmpty": item.isPlaybackBufferEmpty, "likelyToKeepUp": item.isPlaybackLikelyToKeepUp,
             "ranges": item.loadedTimeRanges.map { value in
@@ -562,6 +590,33 @@ import WebKit
           try? await Task.sleep(for: .seconds(1))
         }
         row["timeline"] = timeline
+        if args.contains("--diagnostic-quality-cycle") {
+          var switches: [[String: Any]] = []
+          if args.contains("--diagnostic-4k"), p.durationSeconds > 60 {
+            p.seek(to: p.durationSeconds * 0.55)
+            try? await Task.sleep(for: .seconds(5))
+          }
+          for (index, target) in (args.contains("--diagnostic-4k") ? [120, 80, 120] : [64, 80, 64]).enumerated() where streams.videos.contains(where: { $0.id == target }) {
+            if index == 1 { p.player.pause() }
+            if index == 2 { p.togglePlayback() }
+            let before = p.player.currentTime().seconds
+            p.selectQuality(target, api: store.api)
+            for _ in 0..<240 {
+              if p.error != nil || !p.loading { break }
+              try? await Task.sleep(for: .milliseconds(250))
+            }
+            switches.append(["target": target, "before": before.isFinite ? before : -1,
+              "startupMS": p.startupMilliseconds, "item": itemState(p),
+              "error": p.error ?? "", "loading": p.loading, "frame": p.renderedFrame,
+              "network": await p.networkStats(), "cdn": await p.cdnAttempts(),
+              "transfer": await p.transferStats()])
+            row["switches"] = switches
+            if let data = try? JSONSerialization.data(withJSONObject: ["samples": rows + [row]], options: [.prettyPrinted, .sortedKeys]) {
+              try? data.write(to: output, options: .atomic)
+            }
+            try? await Task.sleep(for: .seconds(2))
+          }
+        }
         if args.contains("--diagnostic-seek"), let duration = p.player.currentItem?.duration.seconds,
           duration.isFinite, duration > 60, p.error == nil {
           let target = duration * 0.55

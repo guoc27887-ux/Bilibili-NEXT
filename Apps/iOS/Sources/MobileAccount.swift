@@ -634,10 +634,14 @@ struct MobileSettings: View {
         }
         Text("同一画质优先使用所选编码；没有对应流或播放失败时自动回退。AV1 需要设备硬件支持。下次打开视频或切换画质生效。")
           .font(.caption).foregroundStyle(.secondary)
+        Text(VideoCodecPreference.hardwareDecodeSummary + "具体解码方式由系统播放器选择。")
+          .font(.caption).foregroundStyle(.secondary)
         Toggle("自动播放", isOn: $autoPlay)
         Toggle("记住观看位置", isOn: $remember)
         Toggle("同步观看进度到账号", isOn: $sync)
         Stepper("视频加载并发：\(threads)", value: $threads, in: 1...32)
+        Text("此值为并发上限。起播及切换画质先使用最多 4 路，出画后按传输情况逐步增加。")
+          .font(.caption).foregroundStyle(.secondary)
         VStack(alignment: .leading) {
           Text("前向缓冲：\(Int(buffer)) 秒")
           Slider(value: $buffer, in: 5...120, step: 5)

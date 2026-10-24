@@ -1,10 +1,10 @@
 # iOS / iPadOS 安装
 
-首个手机安装包为 **0.1.0 开发预览（build 4）**，随 [v1.1.0 双端版本](https://github.com/wzk112/Bilibili-NEXT/releases/tag/v1.1.0) 发布。支持 iPhone / iPad，最低 iOS / iPadOS 26，真机架构 arm64。
+当前手机安装包为 **0.1.1 开发预览（build 5）**，随 [v1.1.1 双端版本](https://github.com/wzk112/Bilibili-NEXT/releases/tag/v1.1.1) 发布。支持 iPhone / iPad，最低 iOS / iPadOS 26，真机架构 arm64。
 
 ## 下载 IPA 自行签名
 
-1. 下载 `Bilibili-NEXT-0.1.0-iOS-unsigned.ipa`。文件名中的 `unsigned` 表示未签名，不能直接点击安装。
+1. 下载 `Bilibili-NEXT-0.1.1-iOS-unsigned.ipa`。文件名中的 `unsigned` 表示未签名，不能直接点击安装。
 2. 使用自己的 Apple Account / 开发者证书，以及与设备和 Bundle ID 匹配的描述文件，在所选签名工具中完成签名并安装。发布包不包含作者的证书、描述文件或账号数据。
 3. 如果使用开发签名，按设备提示启用开发者模式、信任开发者。签名的有效期、设备限制、续签与安装方式取决于自己的账号及所用工具。
 4. 打开应用，用哔哩哔哩 App 扫码并确认登录。保存二维码后切换到官方 App 扫码，返回时会继续查询同一个二维码。升级后如果提示缺少客户端互动授权，重新扫码一次即可；取消扫码保留现有登录。
@@ -35,6 +35,6 @@ OUTPUT_DIR="$PWD/.build/release-assets" Scripts/package-ios.sh
 
 ## 当前范围
 
-这是开发预览版，手机端功能尚未完全对齐 Mac。真实服务端互动受账号和平台规则影响；后台下载、完整 iPad 布局、画中画恢复和复杂高级弹幕仍有验证缺口。详细已实现功能、实机记录和限制见 [IOS_STATUS.md](IOS_STATUS.md)。
+这是开发预览版，手机端功能尚未完全对齐 Mac。真实服务端互动受账号和平台规则影响；后台下载、iPad 多窗口生命周期、画中画恢复和复杂高级弹幕仍有验证缺口。详细已实现功能、实机记录和限制见 [IOS_STATUS.md](IOS_STATUS.md)。
 
 项目面向个人学习研究，与哔哩哔哩官方无任何关联。源码保留 MIT 许可，第三方声明见 [THIRD_PARTY.md](THIRD_PARTY.md)。

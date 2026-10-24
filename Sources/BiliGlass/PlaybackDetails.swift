@@ -37,6 +37,7 @@ struct PlaybackDetails: View {
   @Bindable var playback: Playback
   @State private var network: [String: Int] = [:]
   @State private var concurrency: [String: Int] = [:]
+  @State private var copied = false
   var body: some View {
     VStack(spacing: 10) {
       HStack {
@@ -81,9 +82,22 @@ struct PlaybackDetails: View {
                 .font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading)
             }
             if let error = playback.error { Text(error).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+            if !playback.failureCode.isEmpty { row("错误代码", playback.failureCode) }
+            if let available = playback.routeDiagnostics["manifest.video.available"] {
+              row("可用视频流", available)
+              row("可用音频流", playback.routeDiagnostics["manifest.audio.available"] ?? "—")
+            }
           }.padding(.trailing, 3)
         }
       }.scrollIndicators(.automatic)
+      Button(copied ? "已复制诊断信息" : "复制播放诊断") {
+        Task {
+          let report = await playback.diagnosticReport()
+          NSPasteboard.general.clearContents()
+          NSPasteboard.general.setString(report, forType: .string)
+          copied = true
+        }
+      }.buttonStyle(.glass).help("包含版本、播放阶段和线路错误；不包含登录凭据或完整媒体地址")
     }.padding(14)
       .background(.black.opacity(0.38), in: .rect(cornerRadius: 18))
       .background { Color.clear.glassEffect(.clear, in: .rect(cornerRadius: 18)) }

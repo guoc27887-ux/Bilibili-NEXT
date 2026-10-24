@@ -28,66 +28,8 @@ struct CommentsView: View {
           comments.load(aid: aid, type: resourceType, api: store.api)
         }
       }
-      if let target = comments.replyingTo {
-        HStack {
-          Text("回复 @" + target.name).font(.callout)
-          Spacer()
-          Button("取消回复") { comments.replyingTo = nil }
-        }
-      }
-      HStack(alignment: .bottom) {
-        TextField(store.account == nil ? "登录后发表评论" : "发表评论", text: $comments.draft, axis: .vertical)
-          .lineLimit(2...5).textFieldStyle(.plain).padding(10).appGlass(12).disabled(
-            store.account == nil || comments.sending)
-        Button(comments.sending ? "发送中" : "发送") {
-          if store.account == nil {
-            store.login()
-          } else {
-            Task { await comments.send(aid: aid, api: store.api) }
-          }
-        }.buttonStyle(.glassProminent).disabled(
-          comments.sending
-            || (store.account != nil
-              && comments.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && comments.attachments.isEmpty)
-        )
-      }
-      if comments.draft.count > 1000 { Text("评论最多 1000 字").foregroundStyle(.red).font(.caption) }
-      HStack {
-        EmojiPicker(api: store.api) { comments.draft += $0.token }
-        Button { comments.attachments += ImageAttachment.choose(multiple: true).prefix(max(0, 9 - comments.attachments.count)) } label: { Label("添加图片", systemImage: "photo.badge.plus") }.buttonStyle(.glass).disabled(comments.attachments.count >= 9)
-        Spacer()
-      }.disabled(store.account == nil || comments.sending)
-      if !comments.attachments.isEmpty { AttachedImages(urls: $comments.attachments).disabled(comments.sending) }
-
-      if let submitted = comments.submittedText, let status = comments.submissionStatus {
-        HStack(alignment: .top, spacing: 12) {
-          Image(systemName: "paperplane").foregroundStyle(biliPink)
-          VStack(alignment: .leading, spacing: 6) {
-            Text(status).font(.callout.weight(.medium))
-            Text(submitted).font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-            Text("这是本次提交记录，公开显示以服务端为准。").font(.caption).foregroundStyle(.secondary)
-          }
-          Spacer(minLength: 0)
-          Button { comments.submittedText = nil; comments.submissionStatus = nil } label: {
-            Image(systemName: "xmark")
-          }.buttonStyle(.plain).help("收起提交记录")
-        }.padding(14).appGlass(14)
-      }
-      if let error = comments.sendError {
-        HStack {
-          Text(error).foregroundStyle(.red).font(.callout)
-          Button("完成验证") {
-            let target =
-              verificationURL
-              ?? store.playback.detail.map {
-                URL(string: "https://www.bilibili.com/video/" + $0.video.bvid)!
-              }
-            if let target {
-              store.webTarget = WebTarget(url: target, title: "评论与验证")
-            }
-          }
-        }
-      }
+      MacCommentComposer(store: store, aid: aid, comments: comments, verificationURL: verificationURL)
+      CommentSubmissionReceipt(comments: comments)
       ForEach(comments.items) { reply in
         VStack(alignment: .leading, spacing: 12) {
           ReplyRow(reply: reply, store: store, aid: aid, comments: comments)
@@ -119,8 +61,135 @@ struct CommentsView: View {
       }
     }.scrollTargetLayout()
       .task(id: "\(resourceType):\(aid)") { comments.loadIfNeeded(aid: aid, type: resourceType, api: store.api) }
+      .sheet(isPresented: Binding(get: { comments.replyingTo != nil }, set: { if !$0 { comments.replyingTo = nil } })) {
+        MacReplyComposerSheet(store: store, aid: aid, comments: comments, verificationURL: verificationURL)
+      }
   }
 }
+struct MacCommentComposer: View {
+  @Bindable var store: Store
+  let aid: Int
+  @Bindable var comments: Comments
+  var verificationURL: URL? = nil
+  var focusOnAppear = false
+  @FocusState private var inputFocused: Bool
+  @State private var verificationPage: WebTarget?
+  var body: some View {
+    VStack(alignment: .leading, spacing: 12) {
+      if let target = comments.replyingTo {
+        HStack {
+          Text("回复 @" + target.name).font(.callout)
+          Spacer()
+          Button("取消回复") { comments.replyingTo = nil }.disabled(comments.sending)
+        }
+      }
+      HStack(alignment: .bottom) {
+        TextField(store.account == nil ? "登录后发表评论" : "发表评论", text: $comments.draft, axis: .vertical)
+          .accessibilityIdentifier("comment-draft").focused($inputFocused)
+          .lineLimit(2...5).textFieldStyle(.plain).padding(10).appGlass(12).disabled(
+            store.account == nil || comments.sending)
+        Button(comments.sending ? "发送中" : "发送") {
+          if store.account == nil {
+            store.login()
+          } else {
+            Task { await comments.send(aid: aid, api: store.api) }
+          }
+        }.buttonStyle(.glassProminent).disabled(
+          comments.sending || comments.draft.count > 1000
+            || (store.account != nil
+              && comments.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && comments.attachments.isEmpty)
+        )
+      }
+      if comments.draft.count > 1000 { Text("评论最多 1000 字").foregroundStyle(.red).font(.caption) }
+      HStack {
+        EmojiPicker(api: store.api) { comments.draft += $0.token }
+        Button { comments.attachments += ImageAttachment.choose(multiple: true).prefix(max(0, 9 - comments.attachments.count)) } label: { Label("添加图片", systemImage: "photo.badge.plus") }.buttonStyle(.glass).disabled(comments.attachments.count >= 9)
+        Spacer()
+      }.disabled(store.account == nil || comments.sending)
+      if !comments.attachments.isEmpty { AttachedImages(urls: $comments.attachments).disabled(comments.sending) }
+
+      if let error = comments.sendError {
+        HStack {
+          Text(error).foregroundStyle(.red).font(.callout)
+          Button("完成验证") {
+            let target =
+              verificationURL
+              ?? store.playback.detail.map {
+                URL(string: "https://www.bilibili.com/video/" + $0.video.bvid)!
+              }
+            if let target {
+              verificationPage = WebTarget(url: target, title: "评论与验证")
+            }
+          }
+        }
+      }
+    }
+    .task { if focusOnAppear { inputFocused = true } }
+    .sheet(item: $verificationPage) { target in
+      CommentOriginalPage(store: store, target: target)
+    }
+  }
+}
+
+struct CommentSubmissionReceipt: View {
+  @Bindable var comments: Comments
+  var body: some View {
+      if let submitted = comments.submittedText, let status = comments.submissionStatus {
+        HStack(alignment: .top, spacing: 12) {
+          Image(systemName: "paperplane").foregroundStyle(biliPink)
+          VStack(alignment: .leading, spacing: 6) {
+            Text(status).font(.callout.weight(.medium))
+            Text(submitted).font(.callout).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
+            Text("这是本次提交记录，公开显示以服务端为准。").font(.caption).foregroundStyle(.secondary)
+          }
+          Spacer(minLength: 0)
+          Button { comments.submittedText = nil; comments.submissionStatus = nil } label: {
+            Image(systemName: "xmark")
+          }.buttonStyle(.plain).help("收起提交记录")
+        }.padding(14).appGlass(14)
+      }
+  }
+}
+
+struct MacReplyComposerSheet: View {
+  @Bindable var store: Store
+  let aid: Int
+  @Bindable var comments: Comments
+  var verificationURL: URL? = nil
+  var body: some View {
+    VStack(alignment: .leading, spacing: 16) {
+      HStack {
+        Text("回复评论").font(.title2.bold())
+        Spacer()
+        Button("收起") { comments.replyingTo = nil }.disabled(comments.sending)
+          .keyboardShortcut(.cancelAction)
+      }
+      if let target = comments.replyingTo {
+        CommentText(content: target.textContent).lineLimit(4)
+          .font(.callout).foregroundStyle(.secondary)
+      }
+      Divider()
+      ScrollView {
+        MacCommentComposer(store: store, aid: aid, comments: comments,
+          verificationURL: verificationURL, focusOnAppear: true)
+      }
+    }.padding(22).frame(width: 600, height: 440)
+      .background { GlassBackdrop() }.interactiveDismissDisabled(comments.sending)
+  }
+}
+
+struct CommentOriginalPage: View {
+  @Bindable var store: Store
+  let target: WebTarget
+  @Environment(\.dismiss) private var dismiss
+  var body: some View {
+    VStack(spacing: 0) {
+      HStack { Text(target.title); Spacer(); Button("完成") { dismiss() } }.padding()
+      OfficialWebPanel(target: target, api: store.api)
+    }.frame(minWidth: 900, minHeight: 650)
+  }
+}
+
 struct ReplyRow: View {
   let reply: Reply
   @Bindable var store: Store

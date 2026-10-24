@@ -72,7 +72,7 @@ private final class NoticeReplyProtocol: URLProtocol, @unchecked Sendable {
     var notice = try #require(NativeNotice.parse(raw))
     #expect(notice.originalPageURL?.absoluteString == "https://www.bilibili.com/video/av123/#reply22")
     notice.commentTarget = nil
-    #expect(notice.originalPageURL == nil)
+    #expect(notice.originalPageURL?.absoluteString == "https://www.bilibili.com/video/av123/")
     let web = try #require(NativeNotice.parse(["id": 2, "item": ["uri": "http://www.bilibili.com/video/BV1xx411c7mD/?p=2#reply22"]]))
     #expect(web.originalPageURL?.absoluteString == "https://www.bilibili.com/video/BV1xx411c7mD/?p=2#reply22")
   }

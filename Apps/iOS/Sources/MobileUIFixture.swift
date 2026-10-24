@@ -5,6 +5,7 @@
   /// Synthetic UI scenarios. This session intercepts every request; no real account is read or written.
   final class MobileUIFixture: URLProtocol, @unchecked Sendable {
     private static let lock = NSLock()
+    private static var readKinds: Set<String> = []
     private static var failed = false
     private static var loginPollFailed = false
     private static var qrRequests = 0
@@ -183,7 +184,24 @@
           entries.append(entry)
         }
         data = ["session_list": Self.empty ? [] : entries, "has_more": 0]
+      } else if path == "/x/msgfeed/unread" {
+        data = ["reply": Self.empty || Self.readKinds.contains("reply") ? 0 : 4,
+          "at": Self.empty || Self.readKinds.contains("at") ? 0 : 2,
+          "like": Self.empty || Self.readKinds.contains("like") ? 0 : 12]
+      } else if path.hasSuffix("single_unread") {
+        data = ["follow_unread": Self.empty ? 0 : 122, "unfollow_unread": 0]
+      } else if path == "/x/msgfeed/like" {
+        Self.readKinds.insert("like")
+        data = ["total": ["cursor": ["is_end": true], "items": Self.empty ? [] : [
+          ["id": 100, "counts": 12, "like_time": 1_790_000_000,
+            "users": [["mid": 11, "nickname": "示例用户"]],
+            "item": ["business": "视频", "title": "我发布的视频标题", "uri": "https://www.bilibili.com/video/BV1xx411c7mD/"]],
+          ["id": 101, "counts": 1, "like_time": 1_790_000_000,
+            "users": [["mid": 12, "nickname": "另一位用户"]],
+            "item": ["business": "评论", "title": "这里是我发表的评论。"]]
+        ]]]
       } else if path.hasPrefix("/x/msgfeed/") {
+        Self.readKinds.insert(String(path.split(separator: "/").last ?? ""))
         data = [
           "items": Self.empty
             ? []

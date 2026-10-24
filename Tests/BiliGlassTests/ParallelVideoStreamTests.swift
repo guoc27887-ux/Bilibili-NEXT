@@ -77,6 +77,38 @@ private actor RecoverableRangeFixture: HTTPRangeStreaming {
   }
 }
 @Suite struct ParallelVideoStreamTests {
+  @Test func coldFourKSegmentsShareFourLanesInsteadOfOpeningTwentyFourConnections() async throws {
+    let source = RangeFixture(delay: .milliseconds(20), uniform: true)
+    let stream = ParallelVideoStream(connections: 24, source: source, startup: true)
+    let first = StreamOutput(), second = StreamOutput()
+    let length: Int64 = 3 * 1024 * 1024
+    async let a = read(stream, first, length: length)
+    async let b = read(stream, second, length: length)
+    _ = try await (a, b)
+    #expect(await source.peak == 4)
+    #expect(await source.active == 0)
+    #expect(await first.bytes == Data(repeating: 7, count: Int(length)))
+    #expect(await second.bytes == Data(repeating: 7, count: Int(length)))
+    #expect(await source.ranges.count == 8)
+    #expect(await stream.statistics()["configuredConnections"] == 24)
+    #expect(await stream.statistics()["effectiveConnections"] == 4)
+  }
+  @Test func startupCeilingIsReleasedGraduallyAndStillRespectsFailures() async throws {
+    let permits = VideoStreamPermits(limit: 24, recoveryInterval: .zero, startup: true)
+    for _ in 0..<32 { try await permits.acquire(); await permits.release(succeeded: true) }
+    #expect(await permits.currentLimit == 4)
+    await permits.finishStartup()
+    for _ in 0..<4 { try await permits.acquire(); await permits.release(succeeded: true) }
+    #expect(await permits.currentLimit == 8)
+    await permits.backOff()
+    #expect(await permits.currentLimit == 4)
+    for _ in 0..<28 { try await permits.acquire(); await permits.release(succeeded: true) }
+    #expect(await permits.currentLimit == 24)
+    let small = VideoStreamPermits(limit: 2, recoveryInterval: .zero, startup: true)
+    await small.finishStartup()
+    for _ in 0..<8 { try await small.acquire(); await small.release(succeeded: true) }
+    #expect(await small.currentLimit == 2)
+  }
   @Test func interruptedBlocksResumeWithoutRepeatingDeliveredBytesOrCompletedSiblings() async throws {
     let output = StreamOutput()
     let fixture = RecoverableRangeFixture()

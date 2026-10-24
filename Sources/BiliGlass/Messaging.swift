@@ -86,6 +86,7 @@ struct PrivateMessage: Identifiable {
 }
 
 @MainActor @Observable final class InboxModel {
+  var onRead: (() async -> Void)?
   var conversations: [Conversation] = []
   var selected: Conversation?
   var messages: [PrivateMessage] = []
@@ -236,6 +237,7 @@ struct PrivateMessage: Identifiable {
         if let i = conversations.firstIndex(where: { $0.id == conversation.id }) {
           conversations[i].unread = 0
         }
+        await onRead?()
       }
     } catch {
       if token == threadIdentity && !Task.isCancelled { messageError = error.localizedDescription }

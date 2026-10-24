@@ -67,10 +67,28 @@ struct Streams {
   let videos: [MediaRepresentation]
   let audio: MediaRepresentation
   let names: [Int: String]
+  var diagnostics: [String: String] = [:]
+}
+struct StreamManifestError: LocalizedError {
+  let kind: String
+  let diagnostics: [String: String]
+  var errorDescription: String? {
+    "没有可用的\(kind == "audio" ? "音频" : "视频")播放源，请重试或在播放详情查看诊断信息。"
+  }
+}
+private enum MediaRepresentationFailure: String, Error {
+  case address, segmentBase, byteRange, attributes
 }
 enum VideoCodecPreference: String, CaseIterable, Identifiable, Sendable {
   case automatic = "auto", av1, hevc
   var id: String { rawValue }
+  static var hardwareDecodeSummary: String {
+    let formats: [(String, CMVideoCodecType)] = [
+      ("H.264", kCMVideoCodecType_H264), ("HEVC", kCMVideoCodecType_HEVC), ("AV1", kCMVideoCodecType_AV1)
+    ]
+    let supported = formats.filter { VTIsHardwareDecodeSupported($0.1) }.map(\.0)
+    return supported.isEmpty ? "系统未报告可用的硬件解码格式。" : "本机支持硬件解码：" + supported.joined(separator: "、") + "。"
+  }
   var title: String {
     switch self { case .automatic: return "自动"; case .av1: return "优先 AV1"; case .hevc: return "优先 HEVC（H.265）" }
   }
@@ -253,7 +271,7 @@ final class Vault {
       #if DEBUG
         print("API HTTP", code, path)
       #endif
-      throw BiliError(text: code == 412 ? "请求受限（412），请稍后重试或登录" : "连接失败（\(code)），请稍后重试")
+      throw BiliError(text: code == 412 ? "请求受限（412），请稍后重试或登录" : "连接失败（\(code)），请稍后重试", code: code)
     }
     guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
       throw BiliError(text: "返回数据无效")
@@ -297,7 +315,7 @@ final class Vault {
     try Task.checkCancellation()
     let reads: Set<String> = [
       "/session_svr/v1/session_svr/get_sessions", "/svr_sync/v1/svr_sync/fetch_session_msgs",
-      "/account/v1/user/cards",
+      "/account/v1/user/cards", "/session_svr/v1/session_svr/single_unread",
     ]
     let writes: Set<String> = [
       "/web_im/v1/web_im/send_msg", "/session_svr/v1/session_svr/update_ack",
@@ -403,36 +421,80 @@ final class Vault {
         "try_look": signedIn ? "0" : "1", "fourk": "1",
         "fnver": "0",
       ])
+    return try Self.parseStreams(d)
+  }
+  static func parseStreams(_ d: [String: Any]) throws -> Streams {
     guard let dash = d["dash"] as? [String: Any] else { throw BiliError(text: "没有可播放的媒体，请登录后重试") }
-    let videos = try (dash["video"] as? [[String: Any]] ?? []).filter { item in
+    var diagnostics: [String: String] = [:]
+    func parse(_ rows: [[String: Any]], kind: MediaKind) -> [MediaRepresentation] {
+      var result: [MediaRepresentation] = []
+      for (index, row) in rows.enumerated() {
+        // Only URL origins and fixed reason codes. Never retain query signatures,
+        // paths, cookies or the complete playurl response in diagnostics.
+        let origins = mediaAddressStrings(row).prefix(8).map(mediaOrigin).joined(separator: ",")
+        let outcome: String
+        do {
+          let representation = try representation(row, kind: kind)
+          result.append(representation)
+          outcome = "ok; usable=\(representation.urlCandidates.count)"
+        } catch {
+          outcome = (error as? MediaRepresentationFailure)?.rawValue ?? "attributes"
+        }
+        diagnostics["manifest.\(kind.rawValue).\(index)"] =
+          "quality=\(row["id"] as? Int ?? 0); \(outcome); sources=\(origins)"
+      }
+      return result
+    }
+    let videoRows = (dash["video"] as? [[String: Any]] ?? []).filter { item in
       let codec = item["codecs"] as? String ?? ""
       return codec.hasPrefix("avc1") || codec.hasPrefix("hvc1") || codec.hasPrefix("hev1")
         || codec.hasPrefix("dvh1") || codec.hasPrefix("dvhe")
         || (codec.hasPrefix("av01") && VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1))
     }
-    .map { try representation($0, kind: .video) }
-    let audios = try (dash["audio"] as? [[String: Any]] ?? []).filter {
+    let audioRows = (dash["audio"] as? [[String: Any]] ?? []).filter {
       ($0["codecs"] as? String ?? "").hasPrefix("mp4a")
-    }.map { try representation($0, kind: .audio) }
-    guard !videos.isEmpty, let audio = audios.max(by: { ($0.bandwidth ?? 0) < ($1.bandwidth ?? 0) })
-    else { throw BiliError(text: "没有系统支持的媒体编码") }
+    }
+    let videos = parse(videoRows, kind: .video)
+    let audios = parse(audioRows, kind: .audio)
+    diagnostics["manifest.video.available"] = "\(videos.count)/\(videoRows.count)"
+    diagnostics["manifest.audio.available"] = "\(audios.count)/\(audioRows.count)"
+    guard !videos.isEmpty else { throw StreamManifestError(kind: "video", diagnostics: diagnostics) }
+    guard let audio = audios.max(by: { ($0.bandwidth ?? 0) < ($1.bandwidth ?? 0) })
+    else { throw StreamManifestError(kind: "audio", diagnostics: diagnostics) }
     var names: [Int: String] = [:]
     for f in d["support_formats"] as? [[String: Any]] ?? [] {
       if let id = f["quality"] as? Int {
         names[id] = f["new_description"] as? String ?? f["display_desc"] as? String
       }
     }
-    return Streams(videos: videos.sorted { $0.id > $1.id }, audio: audio, names: names)
+    return Streams(videos: videos.sorted { $0.id > $1.id }, audio: audio, names: names, diagnostics: diagnostics)
   }
-  private func representation(_ j: [String: Any], kind: MediaKind) throws -> MediaRepresentation {
-    guard let raw = j["baseUrl"] as? String ?? j["base_url"] as? String, let url = URL(string: raw),
-      BiliMediaCDNURLPolicy().allows(url),
-      let seg = j["SegmentBase"] as? [String: String] ?? j["segment_base"] as? [String: String]
-    else { throw BiliError(text: "媒体地址无效") }
+  private static func mediaAddressStrings(_ j: [String: Any]) -> [String] {
+    [j["baseUrl"] as? String, j["base_url"] as? String].compactMap { $0 }
+      + (j["backupUrl"] as? [String] ?? []) + (j["backup_url"] as? [String] ?? [])
+  }
+  private static func mediaOrigin(_ raw: String) -> String {
+    guard let parts = URLComponents(string: raw.hasPrefix("//") ? "https:" + raw : raw),
+      let host = parts.host, host.count <= 253,
+      host.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:[]").contains($0) })
+    else { return "invalid" }
+    let scheme = ["http", "https"].contains(parts.scheme?.lowercased() ?? "") ? parts.scheme!.lowercased() : "other"
+    return scheme + "://" + host + (parts.port.map { ":\($0)" } ?? "")
+  }
+  private static func representation(_ j: [String: Any], kind: MediaKind) throws -> MediaRepresentation {
+    var seen = Set<URL>()
+    let candidates = mediaAddressStrings(j).compactMap { BiliMediaCDNURLPolicy().normalizedURL($0) }
+      .filter { seen.insert($0).inserted }
+    // A rejected primary must not hide the same representation's valid backups.
+    guard let url = candidates.first else { throw MediaRepresentationFailure.address }
+    guard let seg = j["SegmentBase"] as? [String: Any] ?? j["segment_base"] as? [String: Any]
+      ?? j["segmentBase"] as? [String: Any] else { throw MediaRepresentationFailure.segmentBase }
     func range(_ raw: String?) throws -> MediaByteRange {
-      let p = (raw ?? "").split(separator: "-").compactMap { Int64($0) }
-      guard p.count == 2 else { throw BiliError(text: "媒体索引无效") }
-      return try MediaByteRange(start: p[0], endInclusive: p[1])
+      let p = (raw ?? "").split(separator: "-", omittingEmptySubsequences: false)
+      guard p.count == 2, p.allSatisfy({ !$0.isEmpty && $0.allSatisfy({ $0.isASCII && $0.isNumber }) }),
+        let start = Int64(p[0]), let end = Int64(p[1]), end >= start, end < Int64.max
+      else { throw MediaRepresentationFailure.byteRange }
+      return try MediaByteRange(start: start, endInclusive: end)
     }
     let attrs: VideoRepresentationAttributes? =
       kind == .video
@@ -440,17 +502,14 @@ final class Vault {
         width: j["width"] as? Int ?? 0, height: j["height"] as? Int ?? 0,
         frameRate: Self.frameRate(j["frameRate"] as? String ?? j["frame_rate"] as? String),
         dynamicRange: Self.dynamicRange(j)) : nil
-    let backups = (j["backupUrl"] as? [String] ?? j["backup_url"] as? [String] ?? []).compactMap(
-      URL.init(string:)
-    ).filter { BiliMediaCDNURLPolicy().allows($0) }
     return MediaRepresentation(
       id: j["id"] as? Int ?? 0, kind: kind, codecs: j["codecs"] as? String ?? "",
       mimeType: j["mimeType"] as? String ?? j["mime_type"] as? String ?? "video/mp4",
       bandwidth: j["bandwidth"] as? Int, videoAttributes: attrs, primaryURL: url,
-      backupURLs: backups,
+      backupURLs: Array(candidates.dropFirst()),
       segmentBase: SegmentBase(
-        initialization: try range(seg["Initialization"] ?? seg["initialization"]),
-        index: try range(seg["indexRange"] ?? seg["index_range"])))
+        initialization: try range(seg["Initialization"] as? String ?? seg["initialization"] as? String),
+        index: try range(seg["indexRange"] as? String ?? seg["index_range"] as? String)))
   }
   static func frameRate(_ raw: String?) -> Double? {
     guard let raw else { return nil }

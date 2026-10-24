@@ -55,9 +55,9 @@ struct GuidePage: Identifiable {
 }
 
 enum GuideContent {
-  static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1.0"
+  static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1.1"
   // Increment only when guide content changes, not on every build.
-  static let revision = "2026-10-24-release-1.1.0"
+  static let revision = "2026-10-25-release-1.1.1"
   static let tutorial: [GuidePage] = [
     .init(id: "account", title: "登录与账号", location: "左下角账号菜单", symbol: "person.crop.circle", paragraphs: [
       "点击“登录”，用哔哩哔哩 App 扫描二维码，并在手机上确认。同一次扫码会完成浏览与互动所需的登录，凭证保存在本机钥匙串。",
@@ -113,18 +113,17 @@ enum GuideContent {
       "使用指南和更新说明会在首次安装或对应版本首次打开时展示一次。之后可从“帮助”菜单或“设置 → 关于”重新打开。"], settingsTab: 0)
   ]
   static let currentUpdates: [GuidePage] = [
-    .init(id: "update-account", title: "登录与视频互动", location: "1.1.0 · 2026-10-24", symbol: "person.crop.circle.badge.checkmark", paragraphs: [
-      "合并登录、投币授权和修复入口。一次扫码同时保存浏览与客户端互动的登录信息；旧版登录缺少授权时会提示重新登录。",
-      "长按点赞显示进度动画并执行三连，移除独立三连图标。提交后读取服务端状态，减少首次操作已成功却显示未完成的问题。",
-      "取消重新登录会保留现有账号。扫码完成后不会自动投币或重复上次互动。"]),
-    .init(id: "update-loading", title: "分块加载与内存", location: "1.1.0 · 2026-10-24", symbol: "network", paragraphs: [
-      "Mac 与手机端使用同一套分块读取、断线续传和并发恢复逻辑。起播与切换画质优先传输当前需要的数据。",
-      "播放缓存分块直接写入临时文件，减少整块数据在内存中的积累。缩略图按显示尺寸解码，取消重复的原图内存缓存；内存紧张时释放可重新加载的图片。",
-      "播放并发、下载连接数、同时下载数和缓冲时长的用途已加入使用指南。"], settingsTab: 1),
-    .init(id: "update-guide", title: "使用指南与更新说明", location: "1.1.0 · 2026-10-24", symbol: "book", paragraphs: [
-      "首次安装显示使用指南；已有安装升级后显示更新说明。记录保存在本机，更换应用文件不会重新显示已读版本。",
-      "指南包含浏览、播放、三连、评论、弹幕、资料库、消息、动态、下载和线程设置。可从帮助菜单或设置中的关于页面重新查看。",
-      "设置分类和导航按钮使用中性按下反馈，减少切换时的主题色闪动。"])
+    .init(id: "update-playback", title: "播放失败与画质切换", location: "1.1.1 · 2026-10-25", symbol: "play.rectangle", paragraphs: [
+      "修复部分媒体地址与分段信息格式导致的播放失败。一条备选流无效时继续检查其他可用流，并尝试有效的备用地址。",
+      "切换画质时复用连接，起播阶段限制并发，出画后逐步恢复到设置上限。保留观看位置与暂停状态。",
+      "仍然无法播放时，可在错误提示中复制脱敏诊断，连同设备、版本、BV 号和网络类型提交反馈。"]),
+    .init(id: "update-codec", title: "首选编码", location: "设置 → 播放与网络", symbol: "cpu", paragraphs: [
+      "Mac 增加自动、优先 AV1 和优先 HEVC 选项。没有所选编码时使用可用格式，设置在下次打开或切换画质时生效。",
+      "设置中显示设备报告的硬件解码能力，实际解码方式由系统播放器选择。"], settingsTab: 1),
+    .init(id: "update-inbox", title: "消息与回复", location: "1.1.1 · 2026-10-25", symbol: "bubble.left.and.bubble.right", paragraphs: [
+      "Mac 与手机端显示私信、回复、@ 和收到的赞的未读数。前台定时同步，进入后台暂停。",
+      "点赞消息说明被赞的是视频、评论或其他内容；Mac 回复改为独立输入窗口，可从通知定位对应评论。",
+      "同次更新的 iPad 版本增加适应窗口宽度的侧栏、网格和播放页，收起播放页后可从小播放器返回。"])
   ]
   static let release102 = GuidePage(id: "release-1.0.2", title: "1.0.2", location: "版本记录", symbol: "clock.arrow.circlepath", paragraphs: [
     "原生 macOS 浏览与播放，提供推荐、热门、搜索、账号登录和资料库。支持画质切换、全屏、弹幕和视频下载。",

@@ -37,7 +37,7 @@ struct MobileDynamics: View {
         if !items.isEmpty && hasMore && !busy {
           Button("加载更多动态") { Task { await load() } }.buttonStyle(.glass)
         }
-      }.padding(16)
+      }.padding(16).frame(maxWidth: 760).frame(maxWidth: .infinity)
     }.navigationTitle("动态").toolbar {
       Button {
         if store.account == nil { store.login() } else { composing = true }
@@ -518,12 +518,12 @@ struct MobileNotifications: View {
         HStack(alignment: .top, spacing: 12) {
           MobileAvatar(url: row.face).frame(width: 44, height: 44)
           VStack(alignment: .leading, spacing: 8) {
-            Text(row.name).font(.subheadline.weight(.semibold))
+            Text(row.headline).font(.subheadline.weight(.semibold))
             if row.date.timeIntervalSince1970 > 0 {
               Text(row.date, format: .dateTime.month().day().hour().minute())
                 .font(.caption).foregroundStyle(.secondary)
             }
-            Text(row.text).font(.body).textSelection(.enabled)
+            if !row.text.isEmpty { Text(row.text).font(.body).textSelection(.enabled) }
             if !row.quote.isEmpty {
               Text(row.quote).font(.subheadline).foregroundStyle(.secondary)
                 .padding(12).frame(maxWidth: .infinity, alignment: .leading)
@@ -532,7 +532,7 @@ struct MobileNotifications: View {
             if row.commentTarget != nil {
               Button("查看并回复") { commentNotice = row }.buttonStyle(.borderless).frame(minHeight: 44)
             }
-            if row.commentTarget == nil, let url = row.url {
+            if row.commentTarget == nil, let url = row.originalPageURL {
               Button("查看内容") {
                 if let bvid = videoID(url.absoluteString) {
                   store.open(bvid)
@@ -589,10 +589,11 @@ struct MobileNotifications: View {
         (reset ? latest["items"] as? [[String: Any]] ?? [] : [])
         + (total["items"] as? [[String: Any]] ?? [])
       var ids = Set(reset ? [] : rows.map(\.id))
-      let result = raw.compactMap(NativeNotice.parse).filter { ids.insert($0.id).inserted }
+      let result = raw.compactMap { NativeNotice.parse($0, kind: kind) }.filter { ids.insert($0.id).inserted }
       rows = reset ? result : rows + result
       cursor = total["cursor"] as? [String: Any] ?? [:]
       more = cursor["is_end"] as? Bool == false
+      if reset { await store.messageUnread.refresh(api: store.api) }
     } catch {
       if token == generation && !(error is CancellationError) {
         self.error = error.localizedDescription
