@@ -260,7 +260,7 @@ private final class PendingProtocol: URLProtocol, @unchecked Sendable {
     comments.loadIfNeeded(aid: 1, api: api)
     #expect(!comments.hasLoadedCount)
     let nav = try await nextRequest()
-    nav.finish(#"{"code":0,"data":{"wbi_img":{"img_url":"https://i0.hdslb.com/0123456789abcdef0123456789abcdef.png","sub_url":"https://i0.hdslb.com/abcdef0123456789abcdef0123456789.png"}}}"#)
+    nav.finish(#"{"code":0,"data":{"isLogin":false,"wbi_img":{"img_url":"https://i0.hdslb.com/0123456789abcdef0123456789abcdef.png","sub_url":"https://i0.hdslb.com/abcdef0123456789abcdef0123456789.png"}}}"#)
     let first = try await nextRequest()
     first.finish(#"{"code":0,"data":{"cursor":{"is_end":true,"all_count":0},"replies":[]}}"#)
     for _ in 0..<200 where comments.loading { try await Task.sleep(for: .milliseconds(2)) }
@@ -281,7 +281,7 @@ private final class PendingProtocol: URLProtocol, @unchecked Sendable {
     let comments = Comments(), api = api()
     comments.loadIfNeeded(aid: 1, api: api)
     let nav = try await nextRequest()
-    nav.finish(#"{"code":0,"data":{"wbi_img":{"img_url":"https://i0.hdslb.com/0123456789abcdef0123456789abcdef.png","sub_url":"https://i0.hdslb.com/abcdef0123456789abcdef0123456789.png"}}}"#)
+    nav.finish(#"{"code":0,"data":{"isLogin":false,"wbi_img":{"img_url":"https://i0.hdslb.com/0123456789abcdef0123456789abcdef.png","sub_url":"https://i0.hdslb.com/abcdef0123456789abcdef0123456789.png"}}}"#)
     let first = try await nextRequest()
     first.finish(#"{"code":0,"data":{"cursor":{"is_end":true,"all_count":1},"replies":[{"rpid":1,"rcount":1,"replies":[{"rpid":2,"root":1}]}]}}"#)
     for _ in 0..<200 where comments.loading { try await Task.sleep(for: .milliseconds(2)) }

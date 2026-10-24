@@ -348,7 +348,7 @@ final class FixtureProtocol: URLProtocol, @unchecked Sendable {
     let comments = Comments()
     for page in 1...3 {
       FixtureProtocol.handler = { @Sendable request in
-        if request.url?.path.hasSuffix("/nav") == true { return (200, "application/json", Data(#"{"code":0,"data":{}}"#.utf8)) }
+        if request.url?.path.hasSuffix("/nav") == true { return (200, "application/json", Data(#"{"code":0,"data":{"isLogin":false}}"#.utf8)) }
         let params = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!.queryItems!
         let pagination = try JSONSerialization.jsonObject(with: Data(params.first { $0.name == "pagination_str" }!.value!.utf8)) as! [String: String]
         #expect(pagination["offset"] == (page == 1 ? "" : "opaque-same"))

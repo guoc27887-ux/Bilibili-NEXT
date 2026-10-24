@@ -13,6 +13,22 @@
     private static var liked = false
     private static var favorited = false
     static var enabled: Bool { ProcessInfo.processInfo.arguments.contains("--qa-ui") }
+    static var sessionRestorationEnabled: Bool {
+      ProcessInfo.processInfo.arguments.contains("--qa-session-restoration")
+    }
+    @MainActor static func makeSessionAPI() -> API {
+      let configuration = URLSessionConfiguration.ephemeral
+      configuration.protocolClasses = [MobileUIFixture.self]
+      // Exercise real Keychain persistence without reading or replacing a real login.
+      let api = API(loadCredentials: false, transport: URLSession(configuration: configuration),
+        credentialAccount: "qa-session-restoration")
+      if ProcessInfo.processInfo.arguments.contains("--qa-session-seed") {
+        try! api.saveClientLogin(StoredLogin(
+          cookies: ["SESSDATA": "fixture", "bili_jct": "fixture", "DedeUserID": "1"],
+          appCoinAuthorization: .init(accountID: 1, accessToken: "local-app-fixture", expires: .distantFuture)))
+      }
+      return api
+    }
     static var empty: Bool { ProcessInfo.processInfo.arguments.contains("--qa-ui-empty") }
     @MainActor static func makeAPI() -> API {
       let configuration = URLSessionConfiguration.ephemeral
@@ -262,6 +278,15 @@
             ? [] : [["mid": 11, "uname": "搜索用户 " + keyword, "usign": "本地用户搜索结果", "fans": 42]]
         ]
       } else if path == "/x/web-interface/nav" {
+        if Self.sessionRestorationEnabled {
+          if ProcessInfo.processInfo.arguments.contains("--qa-session-offline") {
+            client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet)); return
+          }
+          if ProcessInfo.processInfo.arguments.contains("--qa-session-expired")
+            || !(request.value(forHTTPHeaderField: "Cookie") ?? "").contains("SESSDATA=fixture") {
+            code = -101
+          }
+        }
         data = ["mid": 1, "uname": "本地测试", "isLogin": true, "money": 10.0 - Double(Self.coins)]
       }
       let response = HTTPURLResponse(

@@ -28,7 +28,7 @@ struct MobileInbox: View {
   }
   var body: some View {
     ScrollView {
-      LazyVStack(alignment: .leading, spacing: 0) {
+      VStack(alignment: .leading, spacing: 0) {
         if searching {
           HStack {
             Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -41,20 +41,25 @@ struct MobileInbox: View {
             .padding(.horizontal, 16).padding(.bottom, 12)
         }
         GlassEffectContainer(spacing: 12) {
-          LazyVGrid(
-            columns: Array(
-              repeating: GridItem(.flexible(), spacing: 12),
-              count: textSize.isAccessibilitySize ? 2 : 4), spacing: 16
-          ) {
-            shortcut("回复我的", icon: "bubble.left.and.bubble.right.fill", color: .teal, kind: 1)
-            shortcut("@我的", icon: "at", color: .blue, kind: 2)
-            shortcut("收到的赞", icon: "hand.thumbsup.fill", color: biliPink, kind: 3)
-            Button {
-              destination = 4
-            } label: {
-              MobileInboxShortcut(title: "系统通知", icon: "bell.badge.fill", color: .orange)
-            }.accessibilityIdentifier("inbox-system")
-          }.buttonStyle(.plain).padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 22)
+          // These four persistent controls need their full geometry before the
+          // glass container is composited. Only the conversation rows are lazy.
+          Grid(horizontalSpacing: 12, verticalSpacing: 16) {
+            GridRow {
+              shortcut("回复我的", icon: "bubble.left.and.bubble.right.fill", color: .teal, kind: 1)
+              shortcut("@我的", icon: "at", color: .blue, kind: 2)
+              if !textSize.isAccessibilitySize {
+                shortcut("收到的赞", icon: "hand.thumbsup.fill", color: biliPink, kind: 3)
+                systemShortcut
+              }
+            }
+            if textSize.isAccessibilitySize {
+              GridRow {
+                shortcut("收到的赞", icon: "hand.thumbsup.fill", color: biliPink, kind: 3)
+                systemShortcut
+              }
+            }
+          }.buttonStyle(.plain).fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 16).padding(.top, 16).padding(.bottom, 22)
         }
         HStack(spacing: 12) {
           Text("私信").font(.subheadline.weight(.semibold))
@@ -73,16 +78,17 @@ struct MobileInbox: View {
             Button("登录") { store.login() }.buttonStyle(.glassProminent)
           }
         } else {
-          ForEach(conversations) { conversation in
-            Button {
-              store.conversationPresented = true
-              selectedConversation = conversation
-            } label: {
-              MobileConversationRow(conversation: conversation)
-            }.buttonStyle(.plain).accessibilityIdentifier("conversation-\(conversation.id)")
-              .padding(.horizontal, 16)
-            Divider().padding(.leading, 80).padding(.trailing, 16)
-
+          LazyVStack(spacing: 0) {
+            ForEach(conversations) { conversation in
+              Button {
+                store.conversationPresented = true
+                selectedConversation = conversation
+              } label: {
+                MobileConversationRow(conversation: conversation)
+              }.buttonStyle(.plain).accessibilityIdentifier("conversation-\(conversation.id)")
+                .padding(.horizontal, 16)
+              Divider().padding(.leading, 80).padding(.trailing, 16)
+            }
           }
           if store.inbox.loading { ProgressView("正在加载会话").frame(maxWidth: .infinity) }
           if let error = store.inbox.error {
@@ -130,6 +136,11 @@ struct MobileInbox: View {
       .task(id: store.account?.mid) {
         if store.account != nil { await store.inbox.load(api: store.api); await store.messageUnread.refresh(api: store.api) }
       }
+  }
+  private var systemShortcut: some View {
+    Button { destination = 4 } label: {
+      MobileInboxShortcut(title: "系统通知", icon: "bell.badge.fill", color: .orange)
+    }.accessibilityIdentifier("inbox-system")
   }
   private func shortcut(_ title: String, icon: String, color: Color, kind: Int) -> some View {
     Button {

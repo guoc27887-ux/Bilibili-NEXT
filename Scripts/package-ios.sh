@@ -36,8 +36,13 @@ for name in ['LICENSE.txt', 'BiliKit-LICENSE.txt', 'THIRD_PARTY.md']:
     assert (app / name).is_file(), name
 print('Verified unsigned arm64 device app, iPhone/iPad support and bundled licenses.')
 PY
-ipa="$output_dir/Bilibili-NEXT-$version-iOS-unsigned.ipa"
+# A certificate-free ad-hoc seal supplies the normal Mach-O signature command
+# and CodeResources expected by re-signers. This is not an installable signature.
+codesign --force --sign - --timestamp=none "$work_dir/package/Payload/Bilibili NEXT.app"
+codesign --verify --deep --strict "$work_dir/package/Payload/Bilibili NEXT.app"
+ipa="$output_dir/Bilibili-NEXT-$version-iOS-self-sign.ipa"
 (cd "$work_dir/package" && COPYFILE_DISABLE=1 /usr/bin/zip -q -r "$work_dir/package.ipa" Payload)
 /usr/bin/unzip -tq "$work_dir/package.ipa"
+python3 Scripts/validate-ipa.py "$work_dir/package.ipa"
 mv -f "$work_dir/package.ipa" "$ipa"
 printf '%s\n' "$ipa" "Archive log: $work_dir/archive.log"

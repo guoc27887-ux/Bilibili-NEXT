@@ -4,6 +4,47 @@ import UIKit
 @MainActor final class MobileSmokeTests: XCTestCase {
   override func setUpWithError() throws { continueAfterFailure = false }
 
+  private func openSessionAccount(_ app: XCUIApplication) {
+    let tablet = app.buttons["tablet-nav-profile"]
+    if tablet.waitForExistence(timeout: 3) { tablet.tap() }
+    else {
+      XCTAssertTrue(app.buttons["我的"].waitForExistence(timeout: 10))
+      app.buttons["我的"].tap()
+    }
+  }
+
+  func testSavedLoginSurvivesTerminationAndOfflineRelaunch() {
+    let app = XCUIApplication()
+    app.launchArguments = ["--qa-session-restoration", "--qa-session-seed"]
+    app.launch()
+    openSessionAccount(app)
+    XCTAssertTrue(app.staticTexts["本地测试"].firstMatch.waitForExistence(timeout: 15))
+    app.terminate()
+    app.launchArguments = ["--qa-session-restoration", "--qa-session-offline"]
+    app.launch()
+    openSessionAccount(app)
+    XCTAssertTrue(app.staticTexts["UID 1"].waitForExistence(timeout: 15))
+    XCTAssertFalse(app.buttons["登录哔哩哔哩"].firstMatch.exists)
+    XCTAssertTrue(app.buttons["retry-account-restoration"].waitForExistence(timeout: 8))
+    attach("saved-login-offline-relaunch", app: app)
+    app.terminate()
+    app.launchArguments = ["--qa-session-restoration"]
+    app.launch()
+    openSessionAccount(app)
+    XCTAssertTrue(app.staticTexts["本地测试"].firstMatch.waitForExistence(timeout: 15))
+    XCTAssertFalse(app.buttons["retry-account-restoration"].exists)
+  }
+
+  func testConfirmedExpiredLoginRequiresSignIn() {
+    let app = XCUIApplication()
+    app.launchArguments = ["--qa-session-restoration", "--qa-session-seed", "--qa-session-expired"]
+    app.launch()
+    openSessionAccount(app)
+    XCTAssertTrue(app.staticTexts["登录已失效，请重新登录。"].waitForExistence(timeout: 15))
+    XCTAssertTrue(app.buttons["登录哔哩哔哩"].firstMatch.exists)
+    XCTAssertFalse(app.buttons["retry-account-restoration"].exists)
+  }
+
   private func interactionApp(_ extra: [String] = []) -> XCUIApplication {
     let app = XCUIApplication()
     app.launchArguments = ["--qa-ui", "--qa-navigation", "--qa-app-coins"] + extra
@@ -257,6 +298,44 @@ import UIKit
     goBack(app)
     XCTAssertEqual(app.buttons["inbox-category-1"].value as? String, "无未读")
     XCTAssertEqual(app.buttons["inbox-category-2"].value as? String, "2 条未读")
+  }
+
+  func testInboxShortcutsAfterSearchAndRotation() {
+    let app = XCUIApplication()
+    defer { XCUIDevice.shared.orientation = .portrait }
+    for largeText in [false, true] {
+      app.launchArguments = ["--qa-ui", "--qa-inbox", "-appearance", "dark"]
+      if largeText {
+        app.launchArguments += ["-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityXXXL"]
+      }
+      for orientation in [UIDeviceOrientation.landscapeLeft, .portrait] {
+        XCUIDevice.shared.orientation = orientation
+        app.launch()
+        let first = app.buttons["inbox-category-1"]
+        XCTAssertTrue(first.waitForExistence(timeout: 10))
+        app.buttons["搜索消息"].tap()
+        XCTAssertTrue(app.textFields["搜索名称或消息"].waitForExistence(timeout: 5))
+        app.buttons["取消"].tap()
+        for id in ["inbox-category-1", "inbox-category-2", "inbox-category-3", "inbox-system"] {
+          let button = app.buttons[id]
+          // Accessibility text can put the second row below the short landscape
+          // viewport on iPhone. It must remain reachable by ordinary scrolling.
+          for _ in 0..<3 where !button.isHittable {
+            let scroll = app.scrollViews.firstMatch
+            scroll.coordinate(withNormalizedOffset: CGVector(dx: 0.9, dy: 0.72))
+              .press(forDuration: 0.05, thenDragTo: scroll.coordinate(
+                withNormalizedOffset: CGVector(dx: 0.9, dy: 0.50)))
+          }
+          XCTAssertTrue(button.isHittable, id)
+          XCTAssertGreaterThanOrEqual(button.frame.height, 75, id)
+          if !largeText {
+            XCTAssertGreaterThanOrEqual(button.frame.minY, app.navigationBars.firstMatch.frame.maxY, id)
+          }
+        }
+        attach("inbox-shortcuts-\(largeText)-\(orientation.rawValue)", app: app)
+        app.terminate()
+      }
+    }
   }
 
   func testInboxLayoutCategoriesAndUnreadFilter() {

@@ -29,5 +29,5 @@ if [[ "$(git rev-parse HEAD)" != "$release_commit" || -n "$(git status --porcela
   exit 1
 fi
 git archive --format=zip --prefix="Bilibili-NEXT-$version/" -o "$output_dir/Bilibili-NEXT-source-$version.zip" "$release_commit"
-(cd "$output_dir" && shasum -a 256 "$stem.zip" "$stem.dmg" "Bilibili-NEXT-$ios_version-iOS-unsigned.ipa" "Bilibili-NEXT-source-$version.zip" > "Bilibili-NEXT-$version-SHA256SUMS.txt")
+(cd "$output_dir" && shasum -a 256 "$stem.zip" "$stem.dmg" "Bilibili-NEXT-$ios_version-iOS-self-sign.ipa" "Bilibili-NEXT-source-$version.zip" > "Bilibili-NEXT-$version-SHA256SUMS.txt")
 printf '%s\n' "$output_dir/$stem.zip" "$output_dir/$stem.dmg"

@@ -231,7 +231,9 @@ struct MobileRoot: View {
   @AppStorage("appearance") private var appearance = "system"
   var body: some View {
     Group {
-      if UIDevice.current.userInterfaceIdiom == .pad {
+      if !store.credentialsRestored {
+        ProgressView("恢复登录中").frame(maxWidth: .infinity, maxHeight: .infinity)
+      } else if UIDevice.current.userInterfaceIdiom == .pad {
         MobileTabletRoot(store: store)
       } else {
         phoneTabs.modifier(MobilePlayerAccessory(store: store))

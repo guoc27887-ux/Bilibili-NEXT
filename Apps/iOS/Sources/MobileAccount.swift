@@ -165,6 +165,7 @@ struct MobileOfficialWeb: UIViewRepresentable {
             webCookies != self.store.api.cookies.filter({ auth.contains($0.key) }) else { return }
           do {
             try self.store.api.saveWebLogin(webCookies)
+            self.store.clearAccountRestorationMessage()
             self.generation = self.store.api.authenticationGeneration
             let savedGeneration = self.generation
             let mid = Int(webCookies["DedeUserID"]!)!
@@ -326,6 +327,15 @@ struct MobileAccount: View {
           } label: {
             Label(store.restoring ? "恢复登录中" : "登录哔哩哔哩", systemImage: "person.crop.circle")
           }.disabled(store.restoring)
+        }
+      }
+      if let message = store.accountRestoreMessage {
+        Section {
+          Text(message).font(.footnote).foregroundStyle(.secondary)
+          if store.accountNeedsRetry {
+            Button("重试登录状态检查") { Task { await store.refreshAccount() } }
+              .accessibilityIdentifier("retry-account-restoration")
+          }
         }
       }
       Section("我的资料库") {

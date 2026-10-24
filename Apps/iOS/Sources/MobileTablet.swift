@@ -146,10 +146,13 @@ struct MobileTabletRoot: View {
         HStack(spacing: 10) {
           MobileAvatar(url: store.account?.face ?? "").frame(width: 32, height: 32).clipShape(
             .circle)
-          Text(store.account?.name ?? "登录哔哩哔哩").font(.subheadline).lineLimit(1)
+          Text(store.account?.name ?? (store.restoring ? "恢复登录中" : "登录哔哩哔哩"))
+            .font(.subheadline).lineLimit(1)
           Spacer(minLength: 0)
         }.padding(.horizontal, 14).frame(minHeight: 58)
       }.buttonStyle(.plain).glassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
+        .disabled(store.restoring && store.account == nil)
+        .accessibilityIdentifier("tablet-account")
     }.accessibilityIdentifier("tablet-sidebar")
   }
 

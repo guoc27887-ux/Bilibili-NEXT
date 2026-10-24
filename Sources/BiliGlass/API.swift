@@ -164,30 +164,44 @@ final class Vault {
   var dynamicCursor = ""
   var dynamicHasMore = true
   private let searchID = UUID().uuidString.lowercased() + "infoc"
-  init(loadCredentials: Bool = true, transport: URLSession? = nil) {
+  private let credentialAccount: String
+  private var legacyAuthorizationAccount: String {
+    credentialAccount == "cookies" ? AppCoinAuthorization.vaultAccount : credentialAccount + ".legacy-authorization"
+  }
+  init(loadCredentials: Bool = true, transport: URLSession? = nil, credentialAccount: String = "cookies") {
+    self.credentialAccount = credentialAccount
     let c = URLSessionConfiguration.ephemeral
     c.httpCookieStorage = nil
     c.httpShouldSetCookies = false
     c.timeoutIntervalForRequest = 25
     c.urlCache = nil
     session = transport ?? URLSession(configuration: c)
-    if loadCredentials, let data = Vault.load(), let saved = StoredLogin.decode(data)
+    if loadCredentials, let data = Vault.load(account: credentialAccount), let saved = StoredLogin.decode(data)
     {
       cookies = saved.cookies
       appCoinAuthorization = saved.appCoinAuthorization
-      if appCoinAuthorization == nil, let data = Vault.load(account: AppCoinAuthorization.vaultAccount) {
+      if appCoinAuthorization == nil, let data = Vault.load(account: legacyAuthorizationAccount) {
         appCoinAuthorization = try? JSONDecoder().decode(AppCoinAuthorization.self, from: data)
       }
     }
   }
-  func restoreCredentials() async {
+  func restoreCredentials(read: @escaping @Sendable (String) -> Data? = { Vault.load(account: $0) }) async {
     let generation = authenticationGeneration
+    let account = credentialAccount
+    let legacy = legacyAuthorizationAccount
     let (data, appData) = await Task.detached(priority: .userInitiated) {
-      (Vault.load(), Vault.load(account: AppCoinAuthorization.vaultAccount))
+      (read(account), read(legacy))
     }.value
     guard !Task.isCancelled, generation == authenticationGeneration, let data,
       let saved = StoredLogin.decode(data)
     else { return }
+    // Home feeds can ask for WBI before the Keychain read finishes. Their guest
+    // navigation response belongs to the old session, even if it arrives later.
+    navigationTask?.task.cancel()
+    navigationTask = nil
+    authenticationGeneration = UUID()
+    interactionVerification = nil
+    wbiKey = nil
     cookies = saved.cookies
     appCoinAuthorization = saved.appCoinAuthorization
       ?? appData.flatMap { try? JSONDecoder().decode(AppCoinAuthorization.self, from: $0) }
@@ -197,26 +211,26 @@ final class Vault {
       login.cookies["SESSDATA"] != nil, login.cookies["bili_jct"] != nil else {
       throw BiliError(text: "登录信息不完整，保留原登录")
     }
-    try Vault.save(JSONEncoder().encode(login))
+    try Vault.save(JSONEncoder().encode(login), account: credentialAccount)
     navigationTask?.task.cancel(); navigationTask = nil
     cookies = login.cookies
     appCoinAuthorization = token
     authenticationGeneration = UUID()
     interactionVerification = nil
     wbiKey = nil
-    Vault.clear(account: AppCoinAuthorization.vaultAccount)
+    Vault.clear(account: legacyAuthorizationAccount)
     WebSession.shared.reset()
   }
   func saveWebLogin(_ webCookies: [String: String]) throws {
     let login = try StoredLogin.webLogin(cookies: webCookies, previous: appCoinAuthorization)
-    try Vault.save(JSONEncoder().encode(login))
+    try Vault.save(JSONEncoder().encode(login), account: credentialAccount)
     navigationTask?.task.cancel(); navigationTask = nil
     cookies = login.cookies
     appCoinAuthorization = login.appCoinAuthorization
     authenticationGeneration = UUID()
     interactionVerification = nil
     wbiKey = nil
-    Vault.clear(account: AppCoinAuthorization.vaultAccount)
+    Vault.clear(account: legacyAuthorizationAccount)
   }
   var signedIn: Bool { cookies["SESSDATA"] != nil }
   func logout() {
@@ -226,8 +240,8 @@ final class Vault {
     interactionVerification = nil
     cookies = [:]
     appCoinAuthorization = nil
-    Vault.clear()
-    Vault.clear(account: AppCoinAuthorization.vaultAccount)
+    Vault.clear(account: credentialAccount)
+    Vault.clear(account: legacyAuthorizationAccount)
     WebSession.shared.reset()
     wbiKey = nil
   }
@@ -281,6 +295,11 @@ final class Vault {
       throw BiliError(
         text: code == -101 ? "请重新登录" : "\(root["message"] as? String ?? "请求失败")（\(code)）", code: code)
     }
+    if path == "/x/web-interface/nav", code == -101 {
+      var result = root["data"] as? [String: Any] ?? [:]
+      result["isLogin"] = false
+      return result
+    }
     if path.hasSuffix("qrcode/poll"), let result = root["data"] as? [String: Any],
       result["code"] as? Int == 0
     {
@@ -300,9 +319,9 @@ final class Vault {
       }
       guard signedIn else { throw BiliError(text: "登录凭据缺失，请重新扫码") }
       authenticationGeneration = UUID()
-      try Vault.save(JSONEncoder().encode(cookies))
+      try Vault.save(JSONEncoder().encode(cookies), account: credentialAccount)
       appCoinAuthorization = nil
-      Vault.clear(account: AppCoinAuthorization.vaultAccount)
+      Vault.clear(account: legacyAuthorizationAccount)
     }
     if let object = root["data"] as? [String: Any] { return object }
     if let array = root["data"] as? [Any] { return ["items": array] }
@@ -384,7 +403,10 @@ final class Vault {
         imageURL.deletingPathExtension().lastPathComponent
           + subURL.deletingPathExtension().lastPathComponent)
     }
-    guard data["isLogin"] as? Bool == true else { return nil }
+    guard let loggedIn = data["isLogin"] as? Bool else {
+      throw BiliError(text: "账号状态返回不完整，请稍后重试")
+    }
+    guard loggedIn else { return nil }
     return Account(
       name: data["uname"] as? String ?? "已登录", mid: data["mid"] as? Int ?? 0,
       face: data["face"] as? String ?? "")

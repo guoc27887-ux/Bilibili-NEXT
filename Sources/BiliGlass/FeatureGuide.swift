@@ -55,9 +55,9 @@ struct GuidePage: Identifiable {
 }
 
 enum GuideContent {
-  static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1.1"
+  static let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.1.2"
   // Increment only when guide content changes, not on every build.
-  static let revision = "2026-10-25-release-1.1.1"
+  static let revision = "2026-10-25-release-1.1.2"
   static let tutorial: [GuidePage] = [
     .init(id: "account", title: "登录与账号", location: "左下角账号菜单", symbol: "person.crop.circle", paragraphs: [
       "点击“登录”，用哔哩哔哩 App 扫描二维码，并在手机上确认。同一次扫码会完成浏览与互动所需的登录，凭证保存在本机钥匙串。",
@@ -113,6 +113,10 @@ enum GuideContent {
       "使用指南和更新说明会在首次安装或对应版本首次打开时展示一次。之后可从“帮助”菜单或“设置 → 关于”重新打开。"], settingsTab: 0)
   ]
   static let currentUpdates: [GuidePage] = [
+    .init(id: "update-login", title: "登录恢复与移动版修复", location: "1.1.2 · 2026-10-25", symbol: "person.crop.circle", paragraphs: [
+      "恢复本机登录后，不再复用恢复前的游客账号查询结果。iPhone 和 iPad 启动时会等待本机凭据读取完成，再检查登录。",
+      "联网检查遇到断网或超时时保留本机登录并重试，只有服务端明确返回未登录才提示重新登录。",
+      "同次更新的 iPad 版本修复消息分类图标裁切；iOS 自签安装包增加签名结构校验，仍需要使用自己的账号或证书签名安装。"]),
     .init(id: "update-playback", title: "播放失败与画质切换", location: "1.1.1 · 2026-10-25", symbol: "play.rectangle", paragraphs: [
       "修复部分媒体地址与分段信息格式导致的播放失败。一条备选流无效时继续检查其他可用流，并尝试有效的备用地址。",
       "切换画质时复用连接，起播阶段限制并发，出画后逐步恢复到设置上限。保留观看位置与暂停状态。",

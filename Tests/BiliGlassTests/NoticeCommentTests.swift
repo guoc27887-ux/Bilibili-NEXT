@@ -8,7 +8,7 @@ private final class NoticeReplyProtocol: URLProtocol, @unchecked Sendable {
   override func startLoading() {
     let data: [String: Any]
     if request.url?.path == "/x/web-interface/nav" {
-      data = ["wbi_img": ["img_url": "https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz012345.png", "sub_url": "https://i0.hdslb.com/bfs/wbi/012345abcdefghijklmnopqrstuvwxyz.png"]]
+      data = ["isLogin": false, "wbi_img": ["img_url": "https://i0.hdslb.com/bfs/wbi/abcdefghijklmnopqrstuvwxyz012345.png", "sub_url": "https://i0.hdslb.com/bfs/wbi/012345abcdefghijklmnopqrstuvwxyz.png"]]
     } else if request.url?.path == "/x/v2/reply/add" {
       data = ["success_toast": "回复成功", "reply": ["rpid": 33, "root": 11, "member": ["mid": "1", "uname": "me"], "content": ["message": "new reply"]]]
     } else if request.url?.path == "/x/v2/reply/reply" {

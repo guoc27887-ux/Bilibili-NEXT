@@ -7,7 +7,7 @@ import plistlib
 
 ROOT = Path(__file__).resolve().parent.parent
 APP = ROOT / 'Apps/iOS'
-SHARED = '''API AppCoinAuthorization Community VideoActions OfficialChallenge CommentPage CommentText CommentVideoLink VideoExtras VideoPreview SearchFeatures Regions AccountHistory MessageShare NativeSpace DynamicPublishing Messaging ImageUpload WatchHistorySync AppDateFormat ThumbnailCache TaskDeadline Player PlaybackProgressDeadline CDNSelection ParallelVideoStream PlaybackDiskCache VideoSignalling MP4Compatibility DanmakuModels Downloads DownloadPiece DownloadPublication NotificationModels EmojiPicker ConversationTimeline DanmakuLayout DanmakuCloudRules DanmakuTextBitmap DanmakuSettings BiliImageURL DynamicAttachment BAS SVGPath SpecialDanmaku'''.split()
+SHARED = '''API AppCoinAuthorization LoginRestoration Community VideoActions OfficialChallenge CommentPage CommentText CommentVideoLink VideoExtras VideoPreview SearchFeatures Regions AccountHistory MessageShare NativeSpace DynamicPublishing Messaging ImageUpload WatchHistorySync AppDateFormat ThumbnailCache TaskDeadline Player PlaybackProgressDeadline CDNSelection ParallelVideoStream PlaybackDiskCache VideoSignalling MP4Compatibility DanmakuModels Downloads DownloadPiece DownloadPublication NotificationModels EmojiPicker ConversationTimeline DanmakuLayout DanmakuCloudRules DanmakuTextBitmap DanmakuSettings BiliImageURL DynamicAttachment BAS SVGPath SpecialDanmaku'''.split()
 
 def uid(key):
     return hashlib.sha256(key.encode()).hexdigest()[:24].upper()

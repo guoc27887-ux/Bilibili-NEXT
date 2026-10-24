@@ -58,7 +58,12 @@ struct WebTarget: Identifiable {
   let historySync = WatchHistorySync()
   let danmaku = MobileDanmaku()
   var account: Account?
+  var credentialsRestored = false
   var restoring = true
+  var accountRestoreMessage: String?
+  var accountNeedsRetry = false
+  private var checkingAccount = false
+  private var started = false
   var specialScripts = 0
   var specialLayers = 0
   var unsupportedScripts = 0
@@ -90,7 +95,7 @@ struct WebTarget: Identifiable {
     UIDevice.current.beginGeneratingDeviceOrientationNotifications()
     #if DEBUG
       api =
-        MobileFavoriteFixture.enabled
+        MobileUIFixture.sessionRestorationEnabled ? MobileUIFixture.makeSessionAPI() : MobileFavoriteFixture.enabled
         ? MobileFavoriteFixture.makeAPI()
         : MobileUIFixture.enabled ? MobileUIFixture.makeAPI() : API(loadCredentials: false)
     #else
@@ -148,9 +153,12 @@ struct WebTarget: Identifiable {
       })
   }
   func start() async {
+    guard !started else { return }
+    started = true
     #if DEBUG
       if MobileUIFixture.enabled {
         account = Account(name: "本地测试", mid: 1, face: "")
+        credentialsRestored = true
         restoring = false
         if ProcessInfo.processInfo.arguments.contains("--qa-navigation") { open("BV1xx411c7mD") }
         if ProcessInfo.processInfo.arguments.contains("--qa-capture") {
@@ -164,6 +172,7 @@ struct WebTarget: Identifiable {
       }
       if MobileFavoriteFixture.enabled {
         account = Account(name: "本地测试", mid: 1, face: "")
+        credentialsRestored = true
         restoring = false
         let detail = Detail(
           video: Video(
@@ -177,7 +186,10 @@ struct WebTarget: Identifiable {
     #endif
     PlaybackTemporaryFiles.cleanup()
     await api.restoreCredentials()
-    account = try? await api.nav()
+    guard !Task.isCancelled else { started = false; return }
+    account = LoginRestoration.localAccount(api: api, previous: account)
+    credentialsRestored = true
+    await refreshAccount()
     restoring = false
     let args = ProcessInfo.processInfo.arguments
     var qa = args.contains("--qa-capture") && !args.contains("--qa-video")
@@ -418,6 +430,33 @@ struct WebTarget: Identifiable {
     danmaku.stop()
     showPlayer = false
   }
+  func refreshAccount() async {
+    guard !checkingAccount else { return }
+    checkingAccount = true
+    let generation = api.authenticationGeneration
+    defer { checkingAccount = false }
+    do {
+      let result = try await LoginRestoration.check(api: api, previous: account)
+      guard generation == api.authenticationGeneration else { return }
+      account = result.account
+      accountRestoreMessage = result.message
+      accountNeedsRetry = result.shouldRetry
+    } catch {
+      // A disappearing window or logout must not replace a newer account.
+      if Task.isCancelled, generation == api.authenticationGeneration, api.signedIn { accountNeedsRetry = true }
+    }
+  }
+  func retryAccountRestoration() async {
+    for delay in [2, 5, 10] {
+      guard accountNeedsRetry else { return }
+      do { try await Task.sleep(for: .seconds(delay)) } catch { return }
+      await refreshAccount()
+    }
+  }
+  func clearAccountRestorationMessage() {
+    accountRestoreMessage = nil
+    accountNeedsRetry = false
+  }
   func login() {
     showLogin = true
     refreshQR()
@@ -472,6 +511,7 @@ struct WebTarget: Identifiable {
           try Task.checkCancellation()
           guard loginGeneration == api.authenticationGeneration, loginCode == code else { return }
           try api.saveClientLogin(login)
+          clearAccountRestorationMessage()
           let mid = login.appCoinAuthorization!.accountID
           account = Account(name: account?.mid == mid ? account!.name : "已登录", mid: mid,
             face: account?.mid == mid ? account!.face : "")
@@ -517,6 +557,7 @@ struct WebTarget: Identifiable {
     closeLogin()
     closePlayback()
     api.logout()
+    clearAccountRestorationMessage()
     account = nil
     actions.clear()
     inbox.clear(); messageUnread.reset()
@@ -540,6 +581,9 @@ struct WebTarget: Identifiable {
       "unsupportedScripts": unsupportedScripts,
     ]
     state["signedIn"] = api.signedIn
+    state["accountRestored"] = account != nil
+    state["accountNeedsRetry"] = accountNeedsRetry
+    state["accountRestoreMessage"] = accountRestoreMessage ?? ""
     state["unread"] = ["reply": messageUnread.counts.replies, "at": messageUnread.counts.mentions, "like": messageUnread.counts.likes, "private": messageUnread.counts.privateMessages, "error": messageUnread.error ?? ""]
     state["clientAuthorizationPresent"] = api.appCoinAuthorization != nil
     state["clientAuthorizationValid"] = api.appCoinAuthorization?.isValid(for: api.cookies["DedeUserID"]) == true
@@ -617,6 +661,10 @@ enum AppPaths {
     WindowGroup {
       MobileRoot(store: store).tint(biliPink)
         .task { await store.start() }
+        .task(id: "\(phase):\(store.accountNeedsRetry)") {
+          guard phase == .active, store.accountNeedsRetry else { return }
+          await store.retryAccountRestoration()
+        }
         .task(id: "\(phase):\(store.api.authenticationGeneration):\(store.account?.mid ?? 0)") {
           guard store.account != nil else { store.messageUnread.reset(); return }
           guard phase == .active else { return }
