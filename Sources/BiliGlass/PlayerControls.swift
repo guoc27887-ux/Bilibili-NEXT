@@ -22,7 +22,7 @@ struct PlayerControls: View {
       HStack(spacing: 14) {
         Button { playback.focusPlayer(); playback.togglePlayback() } label: {
           Image(systemName: !playback.isPlaying ? "play.fill" : "pause.fill").frame(width: 20)
-        }.buttonStyle(.glass).help(!playback.isPlaying ? "播放" : "暂停")
+        }.adaptiveGlassButtonStyle().help(!playback.isPlaying ? "播放" : "暂停")
           .accessibilityLabel(!playback.isPlaying ? "播放" : "暂停")
         Text(clock(dragging ? position : current)).font(.caption.monospacedDigit()).frame(
           minWidth: 42)
@@ -62,10 +62,10 @@ struct PlayerControls: View {
         if let toggleFullscreen {
           Button(action: toggleFullscreen) {
             Image(systemName: fullscreen ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right")
-          }.buttonStyle(.glass).help(fullscreen ? "退出全屏" : "全屏播放")
+          }.adaptiveGlassButtonStyle().help(fullscreen ? "退出全屏" : "全屏播放")
             .accessibilityLabel(fullscreen ? "退出全屏" : "全屏播放")
         }
-      }.padding(12).glassEffect(.regular, in: .rect(cornerRadius: 18))
+      }.padding(12).adaptiveGlassEffect(.regular, in: .rect(cornerRadius: 18))
       }
     }.onAppear { position = playback.positionSeconds }
       .task(id: extras?.shots?.urls.first) {

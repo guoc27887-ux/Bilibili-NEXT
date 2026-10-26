@@ -67,7 +67,7 @@ struct MobileTabletRoot: View {
             if store.isPlaybackOpen && !store.showPlayer {
               MobileMiniPlayer(store: store)
                 .padding(8).frame(maxWidth: expanded ? 420 : .infinity)
-                .glassEffect(.regular, in: .rect(cornerRadius: 22))
+                .adaptiveGlassEffect(.regular, in: .rect(cornerRadius: 22))
                 .padding(12)
             }
           }
@@ -124,7 +124,7 @@ struct MobileTabletRoot: View {
         Text("Bilibili NEXT").font(.headline)
         Spacer(minLength: 0)
       }.padding(.horizontal, 18).frame(height: 68)
-        .glassEffect(.regular, in: .rect(cornerRadius: 24))
+        .adaptiveGlassEffect(.regular, in: .rect(cornerRadius: 24))
       ScrollView {
         VStack(spacing: 16) {
           group("浏览", items: [.recommend, .popular, .regions, .dynamic, .messages])
@@ -150,7 +150,7 @@ struct MobileTabletRoot: View {
             .font(.subheadline).lineLimit(1)
           Spacer(minLength: 0)
         }.padding(.horizontal, 14).frame(minHeight: 58)
-      }.buttonStyle(.plain).glassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
+      }.buttonStyle(.plain).adaptiveGlassEffect(.regular.interactive(), in: .rect(cornerRadius: 20))
         .disabled(store.restoring && store.account == nil)
         .accessibilityIdentifier("tablet-account")
     }.accessibilityIdentifier("tablet-sidebar")
@@ -179,7 +179,7 @@ struct MobileTabletRoot: View {
         }.buttonStyle(.plain).accessibilityIdentifier("tablet-nav-\(item)")
           .accessibilityAddTraits(selection == item ? .isSelected : [])
       }
-    }.padding(12).glassEffect(.regular, in: .rect(cornerRadius: 24))
+    }.padding(12).adaptiveGlassEffect(.regular, in: .rect(cornerRadius: 24))
   }
 
   private func topbar(expanded: Bool) -> some View {
@@ -206,7 +206,7 @@ struct MobileTabletRoot: View {
         Image(systemName: "gearshape").frame(width: 44, height: 44)
       }.accessibilityLabel("设置")
     }.padding(.horizontal, 12).frame(minHeight: 68)
-      .glassEffect(.regular, in: .rect(cornerRadius: 24))
+      .adaptiveGlassEffect(.regular, in: .rect(cornerRadius: 24))
   }
 
   @ViewBuilder private var destination: some View {

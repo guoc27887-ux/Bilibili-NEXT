@@ -34,8 +34,16 @@ private struct GlassSurface: ViewModifier {
   @AppStorage("glassStyle") private var style = "clear"
   @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
   func body(content: Content) -> some View {
-    content.glassEffect((style == "clear" && !reduceTransparency ? Glass.clear : Glass.regular)
-      .tint(tint).interactive(interactive), in: .rect(cornerRadius: radius))
+    if #available(iOS 26, macOS 26, *) {
+      content.glassEffect((style == "clear" && !reduceTransparency ? Glass.clear : Glass.regular)
+        .tint(tint).interactive(interactive), in: .rect(cornerRadius: radius))
+    } else {
+      // No Liquid Glass below iOS 26 / macOS 26: a regular material
+      // background in the same shape, with the same tint overlaid.
+      content
+        .background(.ultraThinMaterial, in: .rect(cornerRadius: radius))
+        .overlay(.rect(cornerRadius: radius).fill(tint))
+    }
   }
 }
 private struct AppAppearance: ViewModifier {

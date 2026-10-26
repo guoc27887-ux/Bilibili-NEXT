@@ -75,7 +75,7 @@ struct MobileError: View {
   var body: some View {
     VStack(spacing: 12) {
       Label(text, systemImage: "exclamationmark.circle").font(.callout).textSelection(.enabled)
-      if let retry { Button("重试", action: retry).buttonStyle(.glass) }
+      if let retry { Button("重试", action: retry).adaptiveGlassButtonStyle() }
     }.frame(maxWidth: .infinity).padding(20).background(
       .regularMaterial, in: .rect(cornerRadius: 18))
   }
@@ -200,7 +200,7 @@ struct MobileVideoList: View {
           ContentUnavailableView("暂无内容", systemImage: "play.rectangle")
         }
         if !model.items.isEmpty && model.hasMore && !model.loading {
-          Button("加载更多") { Task { await model.load(loader: loader) } }.buttonStyle(.glass).padding()
+          Button("加载更多") { Task { await model.load(loader: loader) } }.adaptiveGlassButtonStyle().padding()
         }
       }.padding(16)
     }.navigationTitle(title).navigationBarTitleDisplayMode(.inline)

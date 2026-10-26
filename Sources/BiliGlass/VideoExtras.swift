@@ -240,7 +240,7 @@ struct PlaybackFeatureControls: View {
       Button("弹幕列表") { danmakuManager = true }
       Spacer()
       if let error = store.extras.subtitleError { Text(error).font(.caption).foregroundStyle(.secondary).lineLimit(1) }
-    }.buttonStyle(.glass).sheet(isPresented: $danmakuManager) { DanmakuManagement(store: store) }
+    }.adaptiveGlassButtonStyle().sheet(isPresented: $danmakuManager) { DanmakuManagement(store: store) }
   }
 }
 struct VideoDiscovery: View {
@@ -248,7 +248,7 @@ struct VideoDiscovery: View {
   var body: some View {
     VStack(alignment: .leading, spacing: 14) {
       if !store.extras.tags.isEmpty {
-        ScrollView(.horizontal) { HStack { ForEach(store.extras.tags) { tag in Button(tag.title) { store.query = tag.title; store.search() }.buttonStyle(.glass) } } }
+        ScrollView(.horizontal) { HStack { ForEach(store.extras.tags) { tag in Button(tag.title) { store.query = tag.title; store.search() }.adaptiveGlassButtonStyle() } } }
       }
       if !store.currentQueue.isEmpty {
         Text(store.currentQueueTitle).font(.headline)
@@ -256,7 +256,7 @@ struct VideoDiscovery: View {
           HStack { ForEach(store.currentQueue) { item in
             Button { store.playQueueItem(item) } label: {
               Text(item.title).font(.callout).lineLimit(2).frame(width: 180, height: 44, alignment: .leading)
-            }.buttonStyle(.glass).tint(item.bvid == store.playback.detail?.video.bvid && (item.cid == nil || item.cid == store.playback.selectedCID) ? biliPink : .primary)
+            }.adaptiveGlassButtonStyle().tint(item.bvid == store.playback.detail?.video.bvid && (item.cid == nil || item.cid == store.playback.selectedCID) ? biliPink : .primary)
           } }
         }
       }

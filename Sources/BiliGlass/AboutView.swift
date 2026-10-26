@@ -32,19 +32,19 @@ struct AboutView: View {
         HStack {
           Button("使用指南") { store.guide.show(.tutorial) }
           Button("更新说明") { store.guide.show(.update(previous: nil)) }
-        }.buttonStyle(.glass)
-        Button("完整更新日志") { document = .init(title: "更新日志", resource: "CHANGELOG", ext: "md") }.buttonStyle(.glass)
+        }.adaptiveGlassButtonStyle()
+        Button("完整更新日志") { document = .init(title: "更新日志", resource: "CHANGELOG", ext: "md") }.adaptiveGlassButtonStyle()
       }
       card("用途与声明") {
         Text("本项目面向个人学习与研究，是非官方哔哩哔哩客户端，与哔哩哔哩官方无任何关联，未获得官方授权或背书。")
         Text("软件按现状提供，不作可用性或适用性保证。使用时请遵守适用法律和平台规则，尊重视频、图片、商标及其他内容权利人的权益。")
         Text("本项目源码采用 MIT 协议。个人学习与研究是项目定位，不构成对 MIT 授权范围的额外限制。第三方组件按各自许可证使用。")
-        Button("查看本项目 MIT 协议") { document = .init(title: "Bilibili NEXT · MIT License", resource: "LICENSE", ext: "txt") }.buttonStyle(.glass)
+        Button("查看本项目 MIT 协议") { document = .init(title: "Bilibili NEXT · MIT License", resource: "LICENSE", ext: "txt") }.adaptiveGlassButtonStyle()
       }
       card("使用的开源组件") {
         Link("BiliKit-Mac · shiinayane", destination: URL(string: "https://github.com/shiinayane/BiliKit-Mac")!).font(.headline)
         Text("MIT License · 使用 BiliModels、BiliApplication、BiliNetworking 和 BiliPlayback 模块，包含 DASH 播放桥接与网络基础组件。保留原作者版权声明。")
-        Button("查看 BiliKit 的 MIT 协议") { document = .init(title: "BiliKit-Mac · MIT License", resource: "BiliKit-LICENSE", ext: "txt") }.buttonStyle(.glass)
+        Button("查看 BiliKit 的 MIT 协议") { document = .init(title: "BiliKit-Mac · MIT License", resource: "BiliKit-LICENSE", ext: "txt") }.adaptiveGlassButtonStyle()
       }
       card("参考项目与文档") {
         Text("以下项目用于协议、格式或设计参考；本项目独立实现对应 Swift 代码，未打包这些项目的实现。各项目的许可证见原仓库。")
@@ -55,7 +55,7 @@ struct AboutView: View {
             Text(project.purpose).font(.callout).foregroundStyle(.secondary)
           }
         }
-        Button("查看完整第三方说明") { document = .init(title: "第三方组件与参考说明", resource: "THIRD_PARTY", ext: "md") }.buttonStyle(.glass)
+        Button("查看完整第三方说明") { document = .init(title: "第三方组件与参考说明", resource: "THIRD_PARTY", ext: "md") }.adaptiveGlassButtonStyle()
       }
     }.tint(.primary).sheet(item: $document) { item in
       VStack(alignment: .leading, spacing: 16) {

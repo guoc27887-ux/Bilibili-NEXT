@@ -69,7 +69,7 @@ struct MobileComments: View {
       if model.hasMore && !model.loading {
         Button("加载更多评论") {
           model.load(aid: aid, type: type, api: store.api, more: !model.items.isEmpty)
-        }.buttonStyle(.glass).frame(maxWidth: .infinity)
+        }.adaptiveGlassButtonStyle().frame(maxWidth: .infinity)
       }
       if !model.loading && model.items.isEmpty && model.error == nil {
         Text("还没有评论").foregroundStyle(.secondary)
@@ -101,7 +101,7 @@ struct MobileCommentComposer: View {
       }
       TextField(store.account == nil ? "登录后评论" : "发表评论", text: $model.draft, axis: .vertical)
         .lineLimit(2...6).textFieldStyle(.plain).padding(12)
-        .glassEffect(.regular, in: .rect(cornerRadius: 18)).disabled(model.sending)
+        .adaptiveGlassEffect(.regular, in: .rect(cornerRadius: 18)).disabled(model.sending)
         .accessibilityIdentifier("comment-draft")
       let composeLayout =
         textSize.isAccessibilitySize
@@ -123,7 +123,7 @@ struct MobileCommentComposer: View {
           } else {
             Task { await model.send(aid: aid, api: store.api) }
           }
-        }.buttonStyle(.glassProminent).disabled(
+        }.adaptiveGlassButtonStyle(prominent: true).disabled(
           model.sending || photoBusy || model.draft.count > 1000
             || (model.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
               && model.attachments.isEmpty)
@@ -288,7 +288,7 @@ struct MobileGallery: View {
         } else if let error {
           VStack(spacing: 16) {
             Text(error).foregroundStyle(.white).padding()
-            Button("重试") { retry += 1 }.buttonStyle(.glass)
+            Button("重试") { retry += 1 }.adaptiveGlassButtonStyle()
           }
         } else {
           ProgressView().tint(.white)
@@ -364,7 +364,7 @@ struct MobileInteractionSheet: View {
                   VStack(spacing: 8) { Image(systemName: "c.circle").font(.title2); Text("\(value) 枚").font(.headline) }
                     .frame(maxWidth: .infinity).padding(.vertical, 12).contentShape(.rect(cornerRadius: 16))
                 }.buttonStyle(.plain).foregroundStyle(.primary)
-                  .glassEffect(.regular.tint(amount == value ? biliPink.opacity(0.22) : .clear), in: .rect(cornerRadius: 16))
+                  .adaptiveGlassEffect(.regular.tint(amount == value ? biliPink.opacity(0.22) : .clear), in: .rect(cornerRadius: 16))
                   .overlay { RoundedRectangle(cornerRadius: 16).strokeBorder(amount == value ? biliPink : .clear, lineWidth: 1.5).allowsHitTesting(false) }
                   .opacity(value > choice.available ? 0.4 : 1)
                   .disabled(busy || value > choice.available)

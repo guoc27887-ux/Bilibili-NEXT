@@ -14,14 +14,14 @@ struct RootView: View {
       HStack(alignment: .top, spacing: 20) {
         sidebar(compact: viewport.size.height < 820).frame(width: AppLayout.sidebarWidth)
         VStack(spacing: 16) {
-          GlassEffectContainer { topbar }
+          AdaptiveGlassEffectContainer { topbar }
           if let reason = store.loginUpgradeReason, !store.loginUpgradeDismissed {
             HStack(spacing: 12) {
               Image(systemName: "person.crop.circle.badge.exclamationmark")
               Text(reason.message).font(.callout).fixedSize(horizontal: false, vertical: true)
               Spacer(minLength: 0)
-              Button("重新登录") { store.login() }.buttonStyle(.glassProminent)
-              Button("稍后") { store.loginUpgradeDismissed = true }.buttonStyle(.glass)
+              Button("重新登录") { store.login() }.adaptiveGlassButtonStyle(prominent: true)
+              Button("稍后") { store.loginUpgradeDismissed = true }.adaptiveGlassButtonStyle()
             }.padding(14).floatingGlass(18)
           }
           if searchFocused && !store.showPlayer { SearchAssistance(store: store) }
@@ -88,7 +88,7 @@ struct RootView: View {
           } label: {
             Image(systemName: "xmark")
           }.buttonStyle(.plain)
-        }.padding(14).glassEffect(.regular, in: .capsule).padding(20)
+        }.padding(14).adaptiveGlassEffect(.regular, in: .capsule).padding(20)
       }
     }
     .sheet(isPresented: $store.showLogin, onDismiss: { store.closeLogin() }) {
@@ -160,7 +160,7 @@ struct RootView: View {
         // Glass sampling must stay inside the scrolling viewport. Sharing a
         // container with the fixed account footer lets the scrolled glass/text
         // render through that footer on short windows.
-        GlassEffectContainer(spacing: 16) {
+        AdaptiveGlassEffectContainer(spacing: 16) {
           VStack(spacing: compact ? 14 : 20) {
             navigationGroup("浏览", items: [.recommend, .popular, .regions, .dynamic, .messages], compact: compact)
             navigationGroup("资料库", items: [.history, .favorites, .later, .downloads, .profile, .web], compact: compact)
@@ -210,7 +210,7 @@ struct RootView: View {
           store.leavePlayer()
         } label: {
           Image(systemName: "chevron.left")
-        }.buttonStyle(.glass).help("返回")
+        }.adaptiveGlassButtonStyle().help("返回")
       }
       HStack(spacing: 10) {
         Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
@@ -232,7 +232,7 @@ struct RootView: View {
       } label: {
         Image(systemName: "arrow.clockwise")
       }.help("刷新")
-    }.buttonStyle(.glass).tint(.primary).padding(.horizontal, 12).frame(height: AppLayout.toolbarHeight).floatingGlass(AppLayout.panelRadius)
+    }.adaptiveGlassButtonStyle().tint(.primary).padding(.horizontal, 12).frame(height: AppLayout.toolbarHeight).floatingGlass(AppLayout.panelRadius)
   }
   @ViewBuilder private var content: some View {
     if store.showPlayer {
@@ -338,7 +338,7 @@ struct RootView: View {
     }.overlay { if store.busy && store.videos.isEmpty { ProgressView("正在加载") } }
   }
   private func videoGrid(_ videos: [Video]) -> some View {
-    GlassEffectContainer(spacing: 0) {
+    AdaptiveGlassEffectContainer(spacing: 0) {
     LazyVGrid(
       columns: [GridItem(.adaptive(minimum: 240, maximum: 390), spacing: 18)], alignment: .leading,
       spacing: 20
@@ -456,7 +456,7 @@ struct PlayerPage: View {
           SubtitleOverlay(extras: store.extras, playback: p)
         }.background(.black).clipShape(RoundedRectangle(cornerRadius: 16))
           .overlay(alignment: .top) {
-            if p.isBoosting { Label(p.boostLabel, systemImage: "forward.fill").font(.callout).padding(10).glassEffect(.regular, in: .capsule).padding(16).colorScheme(.dark).allowsHitTesting(false) }
+            if p.isBoosting { Label(p.boostLabel, systemImage: "forward.fill").font(.callout).padding(10).adaptiveGlassEffect(.regular, in: .capsule).padding(16).colorScheme(.dark).allowsHitTesting(false) }
           }
           .overlay { PlaybackDetailsOverlay(playback: p) }
         PlayerControls(playback: p, toggleFullscreen: { store.fullscreen.open(store: store) }, extras: store.extras)
@@ -522,7 +522,7 @@ struct PlayerPage: View {
               Label("下载", systemImage: "arrow.down").foregroundStyle(.primary)
             }.tint(.primary).disabled(p.loading)
           }
-        }.buttonStyle(.glass).controlSize(.regular)
+        }.adaptiveGlassButtonStyle().controlSize(.regular)
         if let d = p.detail {
           HStack {
             Text(d.video.title).font(.title2.weight(.semibold)).textSelection(.enabled)
@@ -560,7 +560,7 @@ struct PlayerPage: View {
                       Image(systemName: "waveform").foregroundStyle(biliPink)
                     }
                   }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
-                }.buttonStyle(.glass).disabled(p.loading)
+                }.adaptiveGlassButtonStyle().disabled(p.loading)
               }
             }
           }
@@ -598,7 +598,7 @@ struct LoginSheet: View {
           store.showLogin = false
         } label: {
           Image(systemName: "xmark")
-        }.buttonStyle(.glass).help("关闭")
+        }.adaptiveGlassButtonStyle().help("关闭")
       }
       ZStack {
         RoundedRectangle(cornerRadius: 16).fill(.white)
@@ -607,7 +607,7 @@ struct LoginSheet: View {
             store.loginExpired ? 0.15 : 1)
         }
         if store.qrImage == nil && !store.loginExpired { ProgressView() }
-        if store.loginExpired { Button("刷新二维码") { store.refreshQR() }.buttonStyle(.glassProminent) }
+        if store.loginExpired { Button("刷新二维码") { store.refreshQR() }.adaptiveGlassButtonStyle(prominent: true) }
       }.frame(width: 230, height: 230)
       Text(store.loginStatus).font(.callout).foregroundStyle(.secondary)
       Text("一次扫码即可使用浏览、收藏与投币。登录不会自动投币。")

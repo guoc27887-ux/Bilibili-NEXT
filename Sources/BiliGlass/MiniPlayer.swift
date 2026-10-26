@@ -23,11 +23,11 @@ struct MiniPlayer: View {
           .disabled(store.playback.player.currentItem == nil)
         Spacer()
         Button { store.returnToPlayer() } label: { Label("返回播放页", systemImage: "arrow.up.left.square") }
-      }.buttonStyle(.glass)
+      }.adaptiveGlassButtonStyle()
     }.padding(12).frame(width: 324).foregroundStyle(.primary)
       // Regular glass blurs text underneath while retaining background color
       // and native refraction. An opaque backplate would lose that transparency.
-      .glassEffect(.regular, in: .rect(cornerRadius: 22))
+      .adaptiveGlassEffect(.regular, in: .rect(cornerRadius: 22))
       .accessibilityElement(children: .contain).accessibilityLabel("迷你播放器")
   }
 }

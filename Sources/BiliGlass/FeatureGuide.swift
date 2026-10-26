@@ -215,7 +215,7 @@ struct FeatureGuideView: View {
         }
         if mode != .tutorial {
           Button(tutorial ? "查看更新说明" : "查看完整使用指南") { selected = 0; tutorial.toggle() }
-            .buttonStyle(.glass)
+            .adaptiveGlassButtonStyle()
         }
       }.padding(20).frame(width: 246).background(.regularMaterial)
       VStack(alignment: .leading, spacing: 20) {
@@ -226,7 +226,7 @@ struct FeatureGuideView: View {
                 Label("需要更新登录", systemImage: "person.crop.circle.badge.exclamationmark").font(.headline)
                 Text(reason.message)
                 Text("可以稍后处理。原登录会保留，扫码不会自动投币。").font(.callout).foregroundStyle(.secondary)
-                Button("重新登录") { close(); store.login() }.buttonStyle(.glassProminent)
+                Button("重新登录") { close(); store.login() }.adaptiveGlassButtonStyle(prominent: true)
               }.padding(18).frame(maxWidth: .infinity, alignment: .leading)
                 .background(biliPink.opacity(0.08), in: .rect(cornerRadius: 16))
             }
@@ -240,7 +240,7 @@ struct FeatureGuideView: View {
               Text(paragraph).font(.body).lineSpacing(6).fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
             }
             if let tab = page.settingsTab {
-              Button("打开相关设置") { store.preferencesTab = tab; openSettings() }.buttonStyle(.glass)
+              Button("打开相关设置") { store.preferencesTab = tab; openSettings() }.adaptiveGlassButtonStyle()
             }
           }.padding(4).frame(maxWidth: .infinity, alignment: .leading)
         }.id("\(tutorial)-\(selected)")
@@ -249,9 +249,9 @@ struct FeatureGuideView: View {
           Text("\(selected + 1) / \(pages.count)").font(.callout).monospacedDigit().foregroundStyle(.secondary)
           Spacer()
           Button("上一页") { selected -= 1 }.disabled(selected == 0)
-          if selected + 1 < pages.count { Button("下一页") { selected += 1 }.buttonStyle(.glassProminent) }
+          if selected + 1 < pages.count { Button("下一页") { selected += 1 }.adaptiveGlassButtonStyle(prominent: true) }
           Button(selected + 1 == pages.count ? "完成" : "关闭") { close() }.keyboardShortcut(.cancelAction)
-        }.buttonStyle(.glass)
+        }.adaptiveGlassButtonStyle()
       }.padding(30).frame(maxWidth: .infinity, maxHeight: .infinity)
     }.background(Color(nsColor: .windowBackgroundColor)).tint(biliPink).appAppearance()
   }
