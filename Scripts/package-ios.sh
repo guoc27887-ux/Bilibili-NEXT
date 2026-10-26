@@ -14,6 +14,8 @@ xcodebuild -project Apps/iOS/BilibiliNEXT.xcodeproj -scheme BilibiliNEXT \
   CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY='' \
   DEVELOPMENT_TEAM='' archive > "$work_dir/archive.log" 2>&1 || {
     tail -80 "$work_dir/archive.log"
+    echo "--- compiler/linker error lines from archive log ---"
+    grep -E "error:|Undefined symbols" "$work_dir/archive.log" | head -80 || true
     exit 1
   }
 app_dir="$work_dir/BilibiliNEXT.xcarchive/Products/Applications/Bilibili NEXT.app"
