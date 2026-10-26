@@ -1,0 +1,44 @@
+# Build an unsigned, self-signable iOS IPA from the ios18-compat branch.
+#
+# The iOS app targets iOS 18 (see IPHONEOS_DEPLOYMENT_TARGET in the Xcode
+# project). The build uses the repository's own Scripts/package-ios.sh, which
+# archives with signing disabled and seals the app ad-hoc so it can be
+# re-signed with a personal certificate (for example via SideStore/AltStore).
+# This workflow performs no signing of its own: it references no signing
+# identity, certificate, provisioning profile, or secret.
+name: iOS 18 IPA (unsigned)
+
+on:
+  push:
+    branches: [ios18-compat]
+  workflow_dispatch:
+
+jobs:
+  build-ipa:
+    runs-on: macos-26
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 27
+        run: |
+          if [ -d /Applications/Xcode_27.app ]; then
+            sudo xcode-select -s /Applications/Xcode_27.app/Contents/Developer
+          else
+            echo "Xcode 27 not found. Available Xcode installations:"
+            ls /Applications | grep -i xcode || true
+            exit 1
+          fi
+          xcodebuild -version
+
+      - name: Build unsigned iOS IPA
+        run: |
+          mkdir -p .dist
+          OUTPUT_DIR="$PWD/.dist" Scripts/package-ios.sh
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Bilibili-NEXT-iOS-self-sign
+          path: .dist/*.ipa
+          if-no-files-found: error
