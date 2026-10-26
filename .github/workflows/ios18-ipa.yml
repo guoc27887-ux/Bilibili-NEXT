@@ -28,9 +28,10 @@ jobs:
           xcodebuild -version
 
       - name: Build unsigned iOS IPA
+        # Run via zsh: files pushed through the GitHub API lose their executable bit.
         run: |
           mkdir -p .dist
-          OUTPUT_DIR="$PWD/.dist" Scripts/package-ios.sh
+          OUTPUT_DIR="$PWD/.dist" zsh Scripts/package-ios.sh
 
       - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
