@@ -15,19 +15,15 @@ on:
 
 jobs:
   build-ipa:
-    runs-on: macos-26
+    runs-on: xcode-27
     steps:
       - name: Check out
         uses: actions/checkout@v4
 
-      - name: Select Xcode 26.6
+      - name: Select Xcode 27
         run: |
-          if [ -d /Applications/Xcode_26.6.app ]; then
-            sudo xcode-select -s /Applications/Xcode_26.6.app/Contents/Developer
-          else
-            echo "Xcode 26.6 not found. Available Xcode installations:"
-            ls /Applications | grep -i xcode || true
-            exit 1
+          if [ -d /Applications/Xcode_27.app ]; then
+            sudo xcode-select -s /Applications/Xcode_27.app/Contents/Developer
           fi
           xcodebuild -version
 
